@@ -125,6 +125,24 @@ pub fn build_window(app: &adw::Application) {
 
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
 
+    // Register custom icons — look for icons dir relative to the executable
+    let icon_theme = gtk::IconTheme::for_display(&gtk::gdk::Display::default().expect("display"));
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    // Try several possible icon locations
+    for candidate in &[
+        exe_dir.as_ref().map(|d| d.join("../../rust/cmux-host-linux/icons")),
+        exe_dir.as_ref().map(|d| d.join("../icons")),
+        Some(std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/icons"))),
+    ] {
+        if let Some(path) = candidate {
+            if path.exists() {
+                icon_theme.add_search_path(path);
+            }
+        }
+    }
+
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("cmux")
@@ -414,7 +432,19 @@ fn add_workspace(state: &State, working_directory: Option<&str>) {
     s.next_number += 1;
 
     let id = uuid::Uuid::new_v4().to_string();
-    let name = format!("Terminal {number}");
+    // Name from working directory if available, otherwise "Workspace N"
+    let name = if let Some(dir) = working_directory {
+        std::path::Path::new(dir)
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| format!("Workspace {number}"))
+    } else {
+        // Use current directory basename
+        std::env::current_dir()
+            .ok()
+            .and_then(|p| p.file_name().map(|f| f.to_string_lossy().to_string()))
+            .unwrap_or_else(|| format!("Workspace {number}"))
+    };
     let stack_name = format!("ws-{id}");
 
     // Create the initial pane for this workspace
@@ -471,7 +501,12 @@ fn create_pane_for_workspace(
             remove_pane(&state_for_close, &ws_id_close, pane_widget);
         }),
         on_bell: Box::new(move || {
-            mark_workspace_unread(&state_for_bell, &ws_id_bell);
+            // Defer to avoid RefCell borrow conflicts — bell can fire during state mutation
+            let state = state_for_bell.clone();
+            let ws_id = ws_id_bell.clone();
+            glib::idle_add_local_once(move || {
+                mark_workspace_unread(&state, &ws_id);
+            });
         }),
         on_empty: Box::new(move |pane_widget| {
             remove_pane(&state_for_empty, &ws_id_empty, pane_widget);
@@ -699,20 +734,6 @@ fn find_focused_pane(state: &State) -> Option<(String, gtk::Widget)> {
     Some((ws_id, root))
 }
 
-/// Find the GtkNotebook inside a pane widget.
-fn find_notebook_in_pane(pane_widget: &gtk::Widget) -> Option<gtk::Notebook> {
-    if let Some(bx) = pane_widget.downcast_ref::<gtk::Box>() {
-        let mut child = bx.first_child();
-        while let Some(c) = child {
-            if let Ok(nb) = c.clone().downcast::<gtk::Notebook>() {
-                return Some(nb);
-            }
-            child = c.next_sibling();
-        }
-    }
-    None
-}
-
 fn split_focused_pane(state: &State, orientation: gtk::Orientation) {
     if let Some((ws_id, pane_widget)) = find_focused_pane(state) {
         split_pane(state, &ws_id, &pane_widget, orientation);
@@ -721,31 +742,16 @@ fn split_focused_pane(state: &State, orientation: gtk::Orientation) {
 
 fn close_focused_tab(state: &State) {
     if let Some((ws_id, pane_widget)) = find_focused_pane(state) {
-        if let Some(notebook) = find_notebook_in_pane(&pane_widget) {
-            if notebook.n_pages() > 1 {
-                // Close current tab
-                if let Some(page_num) = notebook.current_page() {
-                    notebook.remove_page(Some(page_num));
-                }
-            } else {
-                // Only one tab — close the whole pane
-                remove_pane(state, &ws_id, &pane_widget);
-            }
-        }
+        // For now, close the entire pane. Per-tab close via keyboard
+        // will be wired up when pane internals are accessible.
+        remove_pane(state, &ws_id, &pane_widget);
     }
 }
 
-fn add_tab_to_focused_pane(state: &State, browser: bool) {
-    if let Some((ws_id, pane_widget)) = find_focused_pane(state) {
-        if let Some(notebook) = find_notebook_in_pane(&pane_widget) {
-            if browser {
-                pane::add_browser_tab(&notebook);
-            } else {
-                let callbacks = make_pane_callbacks(state, &ws_id);
-                pane::add_terminal_tab(&notebook, None, &callbacks);
-            }
-        }
-    }
+fn add_tab_to_focused_pane(_state: &State, _browser: bool) {
+    // TODO: Keyboard-driven tab creation requires finding the pane's internal
+    // tab_strip and content_stack from the focused widget. For now, use the
+    // toolbar buttons. This will be wired up in a future refactor.
 }
 
 fn make_pane_callbacks(state: &State, ws_id: &str) -> Rc<PaneCallbacks> {

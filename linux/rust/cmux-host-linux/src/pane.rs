@@ -1,12 +1,9 @@
-//! PaneWidget: a tabbed container with a toolbar.
+//! PaneWidget: a tabbed container with action icons in the tab bar.
 //!
-//! Each pane has:
-//! - A toolbar at top: [+ Terminal] [+ Browser] [Split ↔] [Split ↕] [× Close]
-//! - A GtkNotebook with tabs (each tab is a terminal or browser)
+//! Layout: [tab1 x] [tab2 x] ... ←spacer→ [terminal] [browser] [split-h] [split-v] [close]
 //!
-//! This is the leaf node in the split tree. Splits wrap PaneWidgets in GtkPaned.
+//! All on one line. Tabs left-justified, icons right-justified.
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use gtk4 as gtk;
@@ -21,68 +18,109 @@ use crate::terminal;
 // Types
 // ---------------------------------------------------------------------------
 
-/// Callback for pane actions that affect the workspace tree.
 pub struct PaneCallbacks {
-    /// Called when this pane wants to split. Args: (pane_widget, orientation)
     pub on_split: Box<dyn Fn(&gtk::Widget, gtk::Orientation)>,
-    /// Called when this pane should be closed entirely.
     pub on_close_pane: Box<dyn Fn(&gtk::Widget)>,
-    /// Called when a bell rings in a terminal within this pane.
     pub on_bell: Box<dyn Fn()>,
-    /// Called when all tabs are closed (pane should be removed).
     pub on_empty: Box<dyn Fn(&gtk::Widget)>,
 }
 
 // ---------------------------------------------------------------------------
-// CSS for pane toolbar
+// CSS
 // ---------------------------------------------------------------------------
 
 pub const PANE_CSS: &str = r#"
-.cmux-pane-toolbar {
+.cmux-pane-header {
     background-color: rgba(30, 30, 30, 1);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-    padding: 2px 4px;
-    min-height: 28px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    min-height: 30px;
+    padding: 0 2px;
 }
-.cmux-pane-toolbar button {
+.cmux-tab {
+    background: none;
+    border: none;
+    border-radius: 4px 4px 0 0;
+    padding: 4px 4px 4px 10px;
+    color: rgba(255, 255, 255, 0.45);
+    min-height: 0;
+    font-size: 12px;
+}
+.cmux-tab:hover {
+    color: rgba(255, 255, 255, 0.7);
+    background: rgba(255, 255, 255, 0.04);
+}
+.cmux-tab-active {
+    color: white;
+    background: rgba(255, 255, 255, 0.08);
+}
+.cmux-tab-close {
+    background: none;
+    border: none;
+    border-radius: 3px;
+    padding: 1px;
+    min-height: 0;
+    min-width: 0;
+    color: rgba(255, 255, 255, 0.25);
+    margin-left: 4px;
+}
+.cmux-tab-close:hover {
+    color: rgba(255, 255, 255, 0.8);
+    background: rgba(255, 255, 255, 0.1);
+}
+.cmux-pane-action {
     background: none;
     border: none;
     border-radius: 4px;
-    padding: 2px 6px;
+    padding: 4px 5px;
     min-height: 0;
     min-width: 0;
-    color: rgba(255, 255, 255, 0.5);
-    font-size: 12px;
+    color: rgba(255, 255, 255, 0.35);
 }
-.cmux-pane-toolbar button:hover {
-    background: rgba(255, 255, 255, 0.1);
-    color: rgba(255, 255, 255, 0.85);
-}
-notebook > header {
-    background-color: rgba(30, 30, 30, 1);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-}
-notebook > header tab {
-    background: none;
-    color: rgba(255, 255, 255, 0.5);
-    padding: 4px 8px;
-    min-height: 0;
-    border-radius: 4px 4px 0 0;
-}
-notebook > header tab:checked {
+.cmux-pane-action:hover {
     background: rgba(255, 255, 255, 0.08);
-    color: white;
+    color: rgba(255, 255, 255, 0.8);
 }
-notebook > header tab button {
+.cmux-split-icon {
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    border-radius: 2px;
+    min-width: 16px;
+    min-height: 12px;
+    padding: 0;
+}
+.cmux-split-icon:hover {
+    border-color: rgba(255, 255, 255, 0.8);
+}
+.cmux-split-half-v {
+    min-width: 6px;
+    min-height: 10px;
+}
+.cmux-split-half-h {
+    min-width: 14px;
+    min-height: 4px;
+}
+.cmux-split-btn {
     background: none;
     border: none;
-    padding: 0;
+    border-radius: 4px;
+    padding: 4px 5px;
     min-height: 0;
     min-width: 0;
-    color: rgba(255, 255, 255, 0.3);
 }
-notebook > header tab button:hover {
-    color: rgba(255, 255, 255, 0.8);
+.cmux-split-btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+}
+.cmux-pin-icon {
+    font-size: 9px;
+    margin-right: 2px;
+}
+.cmux-tab-rename-entry {
+    background: rgba(255, 255, 255, 0.1);
+    color: white;
+    border: 1px solid rgba(0, 145, 255, 0.5);
+    border-radius: 3px;
+    padding: 1px 4px;
+    min-height: 0;
+    font-size: 12px;
 }
 "#;
 
@@ -90,8 +128,6 @@ notebook > header tab button:hover {
 // PaneWidget builder
 // ---------------------------------------------------------------------------
 
-/// Create a new pane widget with toolbar + notebook.
-/// Returns the outermost GtkBox widget.
 pub fn create_pane(
     callbacks: Rc<PaneCallbacks>,
     working_directory: Option<&str>,
@@ -102,159 +138,194 @@ pub fn create_pane(
         .vexpand(true)
         .build();
 
-    // Toolbar
-    let toolbar = build_toolbar();
-    outer.append(&toolbar);
+    // The single header line: tabs (left) + action icons (right)
+    let header = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(0)
+        .build();
+    header.add_css_class("cmux-pane-header");
 
-    // Notebook (tabs)
-    let notebook = gtk::Notebook::new();
-    notebook.set_scrollable(true);
-    notebook.set_show_border(false);
-    notebook.set_hexpand(true);
-    notebook.set_vexpand(true);
-    notebook.popup_enable();
-    outer.append(&notebook);
+    // Tab strip (left side, scrollable)
+    let tab_strip = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(0)
+        .hexpand(true)
+        .build();
+
+    // Content stack for tab pages
+    let content_stack = gtk::Stack::new();
+    content_stack.set_transition_type(gtk::StackTransitionType::None);
+    content_stack.set_hexpand(true);
+    content_stack.set_vexpand(true);
+
+    // Action icons (right side)
+    let actions = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(1)
+        .build();
+
+    let new_term_btn = icon_button("utilities-terminal-symbolic", "New terminal tab");
+    let new_browser_btn = icon_button("cmux-globe-symbolic", "New browser tab");
+    let split_h_btn = icon_button("cmux-split-horizontal-symbolic", "Split right");
+    let split_v_btn = icon_button("cmux-split-vertical-symbolic", "Split down");
+    let close_btn = icon_button("window-close-symbolic", "Close pane");
+
+    actions.append(&new_term_btn);
+    actions.append(&new_browser_btn);
+    actions.append(&split_h_btn);
+    actions.append(&split_v_btn);
+    actions.append(&close_btn);
+
+    header.append(&tab_strip);
+    header.append(&actions);
+
+    outer.append(&header);
+    outer.append(&content_stack);
+
+    // Shared state for tabs
+    let tab_state = Rc::new(std::cell::RefCell::new(TabState {
+        tabs: Vec::new(),
+        active_tab: None,
+    }));
 
     // Add first terminal tab
-    let term = add_terminal_tab(&notebook, working_directory, &callbacks);
+    add_terminal_tab_inner(
+        &tab_strip,
+        &content_stack,
+        &tab_state,
+        &callbacks,
+        working_directory,
+        &outer,
+    );
 
-    // Toolbar button actions
-    let nb = notebook.clone();
-    let cb = callbacks.clone();
-    connect_toolbar_buttons(&toolbar, &outer, &nb, cb);
+    // Wire action buttons
+    {
+        let ts = tab_strip.clone();
+        let cs = content_stack.clone();
+        let state = tab_state.clone();
+        let cb = callbacks.clone();
+        let ow = outer.clone();
+        new_term_btn.connect_clicked(move |_| {
+            add_terminal_tab_inner(&ts, &cs, &state, &cb, None, &ow);
+        });
+    }
+    {
+        let ts = tab_strip.clone();
+        let cs = content_stack.clone();
+        let state = tab_state.clone();
+        let cb = callbacks.clone();
+        let ow = outer.clone();
+        new_browser_btn.connect_clicked(move |_| {
+            add_browser_tab_inner(&ts, &cs, &state, &cb, &ow);
+        });
+    }
+    {
+        let pw = outer.clone();
+        let cb = callbacks.clone();
+        split_h_btn.connect_clicked(move |_| {
+            (cb.on_split)(&pw.clone().upcast(), gtk::Orientation::Horizontal);
+        });
+    }
+    {
+        let pw = outer.clone();
+        let cb = callbacks.clone();
+        split_v_btn.connect_clicked(move |_| {
+            (cb.on_split)(&pw.clone().upcast(), gtk::Orientation::Vertical);
+        });
+    }
+    {
+        let pw = outer.clone();
+        let cb = callbacks.clone();
+        close_btn.connect_clicked(move |_| {
+            (cb.on_close_pane)(&pw.clone().upcast());
+        });
+    }
 
     outer
 }
 
 // ---------------------------------------------------------------------------
-// Toolbar
+// Internal tab state
 // ---------------------------------------------------------------------------
 
-fn build_toolbar() -> gtk::Box {
-    let toolbar = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(2)
-        .build();
-    toolbar.add_css_class("cmux-pane-toolbar");
-
-    let term_btn = gtk::Button::builder()
-        .label("Terminal")
-        .tooltip_text("New terminal tab")
-        .build();
-    term_btn.set_widget_name("btn-new-terminal");
-
-    let browser_btn = gtk::Button::builder()
-        .label("Browser")
-        .tooltip_text("New browser tab")
-        .build();
-    browser_btn.set_widget_name("btn-new-browser");
-
-    let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    spacer.set_hexpand(true);
-
-    let split_h_btn = gtk::Button::builder()
-        .label("⬌") // horizontal split icon
-        .tooltip_text("Split right")
-        .build();
-    split_h_btn.set_widget_name("btn-split-h");
-
-    let split_v_btn = gtk::Button::builder()
-        .label("⬍") // vertical split icon
-        .tooltip_text("Split down")
-        .build();
-    split_v_btn.set_widget_name("btn-split-v");
-
-    let close_btn = gtk::Button::builder()
-        .label("✕")
-        .tooltip_text("Close pane")
-        .build();
-    close_btn.set_widget_name("btn-close-pane");
-
-    toolbar.append(&term_btn);
-    toolbar.append(&browser_btn);
-    toolbar.append(&spacer);
-    toolbar.append(&split_h_btn);
-    toolbar.append(&split_v_btn);
-    toolbar.append(&close_btn);
-
-    toolbar
+struct TabEntry {
+    id: String,
+    tab_button: gtk::Box,
+    title_label: gtk::Label,
+    content: gtk::Widget,
+    custom_name: Option<String>,
+    pinned: bool,
 }
 
-fn connect_toolbar_buttons(
-    toolbar: &gtk::Box,
-    pane_widget: &gtk::Box,
-    notebook: &gtk::Notebook,
-    callbacks: Rc<PaneCallbacks>,
-) {
-    // Walk toolbar children to find buttons by name
-    let mut child = toolbar.first_child();
-    while let Some(widget) = child {
-        let next = widget.next_sibling();
-        if let Some(btn) = widget.downcast_ref::<gtk::Button>() {
-            let name = btn.widget_name().to_string();
-            match name.as_str() {
-                "btn-new-terminal" => {
-                    let nb = notebook.clone();
-                    let cb = callbacks.clone();
-                    btn.connect_clicked(move |_| {
-                        let term = add_terminal_tab(&nb, None, &cb);
-                        // Switch to the new tab
-                        if let Some(page) = term.parent() {
-                            let page_num = nb.page_num(&page).or_else(|| nb.page_num(&term.clone().upcast::<gtk::Widget>()));
-                            if let Some(n) = page_num {
-                                nb.set_current_page(Some(n));
-                            }
-                        }
-                    });
-                }
-                "btn-new-browser" => {
-                    let nb = notebook.clone();
-                    btn.connect_clicked(move |_| {
-                        add_browser_tab(&nb);
-                    });
-                }
-                "btn-split-h" => {
-                    let pw = pane_widget.clone();
-                    let cb = callbacks.clone();
-                    btn.connect_clicked(move |_| {
-                        (cb.on_split)(&pw.clone().upcast(), gtk::Orientation::Horizontal);
-                    });
-                }
-                "btn-split-v" => {
-                    let pw = pane_widget.clone();
-                    let cb = callbacks.clone();
-                    btn.connect_clicked(move |_| {
-                        (cb.on_split)(&pw.clone().upcast(), gtk::Orientation::Vertical);
-                    });
-                }
-                "btn-close-pane" => {
-                    let pw = pane_widget.clone();
-                    let cb = callbacks.clone();
-                    btn.connect_clicked(move |_| {
-                        (cb.on_close_pane)(&pw.clone().upcast());
-                    });
-                }
-                _ => {}
-            }
-        }
-        child = next;
+struct TabState {
+    tabs: Vec<TabEntry>,
+    active_tab: Option<String>,
+}
+
+impl TabState {
+    fn find_tab_mut(&mut self, id: &str) -> Option<&mut TabEntry> {
+        self.tabs.iter_mut().find(|e| e.id == id)
     }
 }
 
+fn next_tab_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 // ---------------------------------------------------------------------------
-// Tab management
+// Icon button helper
 // ---------------------------------------------------------------------------
 
-/// Add a new terminal tab to the notebook. Returns the terminal widget.
-pub fn add_terminal_tab(
-    notebook: &gtk::Notebook,
-    working_directory: Option<&str>,
+fn icon_button(icon_name: &str, tooltip: &str) -> gtk::Button {
+    let btn = gtk::Button::builder()
+        .icon_name(icon_name)
+        .tooltip_text(tooltip)
+        .has_frame(false)
+        .build();
+    btn.add_css_class("cmux-pane-action");
+    btn
+}
+
+/// Create a split-pane icon button with two rectangles separated by a divider.
+/// Horizontal = left|right panes, Vertical = top/bottom panes.
+fn split_icon_button(orientation: gtk::Orientation, tooltip: &str) -> gtk::Button {
+    let icon = gtk::Box::new(orientation, 1);
+    icon.add_css_class("cmux-split-icon");
+
+    let (class_name, count) = match orientation {
+        gtk::Orientation::Horizontal => ("cmux-split-half-v", 2),
+        _ => ("cmux-split-half-h", 2),
+    };
+
+    for _ in 0..count {
+        let half = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        half.add_css_class(class_name);
+        icon.append(&half);
+    }
+
+    let btn = gtk::Button::builder()
+        .child(&icon)
+        .tooltip_text(tooltip)
+        .has_frame(false)
+        .build();
+    btn.add_css_class("cmux-split-btn");
+    btn
+}
+
+// ---------------------------------------------------------------------------
+// Tab creation
+// ---------------------------------------------------------------------------
+
+fn add_terminal_tab_inner(
+    tab_strip: &gtk::Box,
+    content_stack: &gtk::Stack,
+    tab_state: &Rc<std::cell::RefCell<TabState>>,
     callbacks: &Rc<PaneCallbacks>,
-) -> vte4::Terminal {
+    working_directory: Option<&str>,
+    pane_outer: &gtk::Box,
+) {
     let term = terminal::create_terminal(working_directory);
-
-    // Tab label with close button
-    let tab_label = build_tab_label("Terminal", notebook, &term.clone().upcast());
+    let tab_id = next_tab_id();
 
     // Bell notification
     {
@@ -264,99 +335,568 @@ pub fn add_terminal_tab(
         });
     }
 
-    // Update tab label when terminal title changes
+    // Tab label button
+    let (tab_btn, title_label) = build_tab_button("Terminal", &tab_id, tab_strip, content_stack, tab_state, callbacks, pane_outer);
+
+    // Update tab label from terminal title (only if no custom name set)
     {
-        let tab_label_text = tab_label.1.clone();
+        let tl = title_label.clone();
+        let state = tab_state.clone();
+        let tid = tab_id.clone();
         term.connect_window_title_notify(move |t: &vte4::Terminal| {
+            // Skip if user set a custom name
+            let has_custom = state.borrow().tabs.iter()
+                .any(|e| e.id == tid && e.custom_name.is_some());
+            if has_custom { return; }
+
             if let Some(title) = t.window_title() {
-                let title_str: String = title.into();
-                if !title_str.is_empty() {
-                    // Truncate for tab display
-                    let display = if title_str.len() > 25 {
-                        format!("{}…", &title_str[..24])
-                    } else {
-                        title_str
-                    };
-                    tab_label_text.set_label(&display);
+                let s: String = title.into();
+                if !s.is_empty() {
+                    let display = if s.len() > 22 { format!("{}…", &s[..21]) } else { s };
+                    tl.set_label(&display);
                 }
             }
         });
     }
 
-    // On child exit, remove the tab
+    // On child exit, remove tab
     {
-        let nb = notebook.clone();
-        let callbacks = callbacks.clone();
-        term.connect_child_exited(move |t: &vte4::Terminal, _status: i32| {
-            let t_widget: gtk::Widget = t.clone().upcast();
-            let nb2 = nb.clone();
-            let callbacks = callbacks.clone();
+        let ts = tab_strip.clone();
+        let cs = content_stack.clone();
+        let state = tab_state.clone();
+        let tid = tab_id.clone();
+        let cb = callbacks.clone();
+        let po = pane_outer.clone();
+        term.connect_child_exited(move |_: &vte4::Terminal, _status: i32| {
+            let ts = ts.clone();
+            let cs = cs.clone();
+            let state = state.clone();
+            let tid = tid.clone();
+            let cb = cb.clone();
+            let po = po.clone();
             glib::idle_add_local_once(move || {
-                if let Some(page_num) = nb2.page_num(&t_widget) {
-                    nb2.remove_page(Some(page_num));
-                }
-                // If notebook is empty, signal pane should close
-                if nb2.n_pages() == 0 {
-                    if let Some(parent) = nb2.parent() {
-                        (callbacks.on_empty)(&parent);
-                    }
-                }
+                remove_tab(&ts, &cs, &state, &tid, &cb, &po);
             });
         });
     }
 
-    let page_num = notebook.append_page(&term, Some(&tab_label.0));
-    notebook.set_tab_reorderable(&term, true);
-    notebook.set_current_page(Some(page_num));
+    let widget: gtk::Widget = term.clone().upcast();
+    content_stack.add_named(&widget, Some(&tab_id));
 
-    // Focus the terminal
+    {
+        let mut ts = tab_state.borrow_mut();
+        ts.tabs.push(TabEntry {
+            id: tab_id.clone(),
+            tab_button: tab_btn,
+            title_label: title_label,
+            content: widget,
+            custom_name: None,
+            pinned: false,
+        });
+    }
+
+    activate_tab(tab_strip, content_stack, tab_state, &tab_id);
     term.grab_focus();
-
-    term
 }
 
-/// Add a browser tab. Returns the WebView widget (or a placeholder if webkit6 unavailable).
-pub fn add_browser_tab(notebook: &gtk::Notebook) -> gtk::Widget {
-    // Try to create a real WebKit browser, fall back to placeholder
-    let (widget, tab_title) = create_browser_widget();
+fn add_browser_tab_inner(
+    tab_strip: &gtk::Box,
+    content_stack: &gtk::Stack,
+    tab_state: &Rc<std::cell::RefCell<TabState>>,
+    callbacks: &Rc<PaneCallbacks>,
+    pane_outer: &gtk::Box,
+) {
+    let tab_id = next_tab_id();
+    let (widget, title) = create_browser_widget();
 
-    let tab_label = build_tab_label(&tab_title, notebook, &widget);
+    let (tab_btn, title_label) = build_tab_button(&title, &tab_id, tab_strip, content_stack, tab_state, callbacks, pane_outer);
 
-    let page_num = notebook.append_page(&widget, Some(&tab_label.0));
-    notebook.set_tab_reorderable(&widget, true);
-    notebook.set_current_page(Some(page_num));
+    content_stack.add_named(&widget, Some(&tab_id));
 
-    widget
+    {
+        let mut ts = tab_state.borrow_mut();
+        ts.tabs.push(TabEntry {
+            id: tab_id.clone(),
+            tab_button: tab_btn,
+            title_label,
+            content: widget,
+            custom_name: None,
+            pinned: false,
+        });
+    }
+
+    activate_tab(tab_strip, content_stack, tab_state, &tab_id);
 }
+
+// Public wrappers for keyboard shortcut use
+pub fn add_terminal_tab_to_notebook(
+    pane_widget: &gtk::Widget,
+    callbacks: &Rc<PaneCallbacks>,
+    working_directory: Option<&str>,
+) {
+    if let Some((header, content_stack, tab_state, pane_outer)) = find_pane_internals(pane_widget) {
+        if let Some(tab_strip) = find_tab_strip(&header) {
+            add_terminal_tab_inner(&tab_strip, &content_stack, &tab_state, callbacks, working_directory, &pane_outer);
+        }
+    }
+}
+
+pub fn add_browser_tab_to_pane(
+    pane_widget: &gtk::Widget,
+    callbacks: &Rc<PaneCallbacks>,
+) {
+    if let Some((header, content_stack, tab_state, pane_outer)) = find_pane_internals(pane_widget) {
+        if let Some(tab_strip) = find_tab_strip(&header) {
+            add_browser_tab_inner(&tab_strip, &content_stack, &tab_state, callbacks, &pane_outer);
+        }
+    }
+}
+
+fn find_pane_internals(_pane_widget: &gtk::Widget) -> Option<(gtk::Box, gtk::Stack, Rc<std::cell::RefCell<TabState>>, gtk::Box)> {
+    // For now, this is not easily retrievable since we don't store references.
+    // The toolbar buttons wire directly. Keyboard shortcuts go through the
+    // create_pane closures. This is a TODO for later refactoring.
+    None
+}
+
+fn find_tab_strip(header: &gtk::Box) -> Option<gtk::Box> {
+    let mut child = header.first_child();
+    while let Some(c) = child {
+        if let Ok(bx) = c.clone().downcast::<gtk::Box>() {
+            if bx.hexpands() {
+                return Some(bx);
+            }
+        }
+        child = c.next_sibling();
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Tab button (label + close)
+// ---------------------------------------------------------------------------
+
+fn build_tab_button(
+    title: &str,
+    tab_id: &str,
+    tab_strip: &gtk::Box,
+    content_stack: &gtk::Stack,
+    tab_state: &Rc<std::cell::RefCell<TabState>>,
+    callbacks: &Rc<PaneCallbacks>,
+    pane_outer: &gtk::Box,
+) -> (gtk::Box, gtk::Label) {
+    let pin_icon = gtk::Label::new(None);
+    pin_icon.add_css_class("cmux-pin-icon");
+    pin_icon.set_visible(false);
+    pin_icon.set_can_target(false); // let clicks pass through to parent
+
+    let label = gtk::Label::builder()
+        .label(title)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .max_width_chars(20)
+        .build();
+    label.set_can_target(false); // let clicks pass through to parent
+
+    // Close button needs its own click handling, so it stays targetable
+    let close_btn = gtk::Button::builder()
+        .icon_name("window-close-symbolic")
+        .has_frame(false)
+        .build();
+    close_btn.add_css_class("cmux-tab-close");
+
+    let inner_box = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    inner_box.set_can_target(false); // pass events through
+    inner_box.append(&pin_icon);
+    inner_box.append(&label);
+
+    // Use an overlay approach: the tab_btn is the event target,
+    // inner_box + close_btn are children
+    let tab_btn = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    tab_btn.add_css_class("cmux-tab");
+    tab_btn.append(&inner_box);
+    tab_btn.append(&close_btn);
+
+    // Left-click on the tab area (not the close button) → activate
+    let click = gtk::GestureClick::new();
+    click.set_button(1);
+    {
+        let tid = tab_id.to_string();
+        let ts = tab_strip.clone();
+        let cs = content_stack.clone();
+        let state = tab_state.clone();
+        click.connect_pressed(move |_, _, _, _| {
+            activate_tab(&ts, &cs, &state, &tid);
+        });
+    }
+    tab_btn.add_controller(click);
+
+    // Right-click → context menu
+    let right_click = gtk::GestureClick::new();
+    right_click.set_button(3);
+    {
+        let tid = tab_id.to_string();
+        let ts = tab_strip.clone();
+        let cs = content_stack.clone();
+        let state = tab_state.clone();
+        let cb = callbacks.clone();
+        let po = pane_outer.clone();
+        let lbl = label.clone();
+        let pin = pin_icon.clone();
+        let tb = tab_btn.clone();
+        right_click.connect_pressed(move |_gesture, _, _x, _y| {
+            show_tab_context_menu(
+                &tb,
+                &tid, &ts, &cs, &state, &cb, &po, &lbl, &pin,
+            );
+        });
+    }
+    tab_btn.add_controller(right_click);
+
+    // Drag source for reorder
+    let drag_source = gtk::DragSource::new();
+    drag_source.set_actions(gtk::gdk::DragAction::MOVE);
+    {
+        let tid = tab_id.to_string();
+        drag_source.connect_prepare(move |_src, _x, _y| {
+            let val = glib::Value::from(&tid);
+            Some(gtk::gdk::ContentProvider::for_value(&val))
+        });
+    }
+    tab_btn.add_controller(drag_source);
+
+    // Drop target for reorder
+    let drop_target = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::MOVE);
+    {
+        let tid = tab_id.to_string();
+        let ts = tab_strip.clone();
+        let state = tab_state.clone();
+        drop_target.connect_drop(move |_, value, _, _| {
+            if let Ok(source_id) = value.get::<String>() {
+                if source_id != tid {
+                    reorder_tab(&ts, &state, &source_id, &tid);
+                    return true;
+                }
+            }
+            false
+        });
+    }
+    tab_btn.add_controller(drop_target);
+
+    // Close button click
+    {
+        let tid = tab_id.to_string();
+        let ts = tab_strip.clone();
+        let cs = content_stack.clone();
+        let state = tab_state.clone();
+        let cb = callbacks.clone();
+        let po = pane_outer.clone();
+        close_btn.connect_clicked(move |_| {
+            let is_pinned = state.borrow().tabs.iter().any(|e| e.id == tid && e.pinned);
+            if !is_pinned {
+                remove_tab(&ts, &cs, &state, &tid, &cb, &po);
+            }
+        });
+    }
+
+    tab_strip.append(&tab_btn);
+
+    (tab_btn, label)
+}
+
+fn show_tab_context_menu(
+    tab_btn: &gtk::Box,
+    tab_id: &str,
+    tab_strip: &gtk::Box,
+    content_stack: &gtk::Stack,
+    tab_state: &Rc<std::cell::RefCell<TabState>>,
+    callbacks: &Rc<PaneCallbacks>,
+    pane_outer: &gtk::Box,
+    label: &gtk::Label,
+    pin_icon: &gtk::Label,
+) {
+    let menu = gtk::PopoverMenu::from_model(None::<&gtk::gio::MenuModel>);
+    let menu_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    menu_box.set_margin_top(4);
+    menu_box.set_margin_bottom(4);
+    menu_box.set_margin_start(4);
+    menu_box.set_margin_end(4);
+
+    // Rename
+    let rename_btn = gtk::Button::with_label("Rename");
+    rename_btn.add_css_class("flat");
+    {
+        let lbl = label.clone();
+        let state = tab_state.clone();
+        let tid = tab_id.to_string();
+        let menu_ref = menu.clone();
+        rename_btn.connect_clicked(move |_| {
+            menu_ref.popdown();
+            show_rename_dialog(&lbl, &state, &tid);
+        });
+    }
+
+    // Pin / Unpin
+    let is_pinned = tab_state.borrow().tabs.iter().any(|e| e.id == tab_id && e.pinned);
+    let pin_label = if is_pinned { "Unpin" } else { "Pin" };
+    let pin_btn = gtk::Button::with_label(pin_label);
+    pin_btn.add_css_class("flat");
+    {
+        let state = tab_state.clone();
+        let tid = tab_id.to_string();
+        let pin = pin_icon.clone();
+        let close = tab_btn.last_child(); // close button
+        let menu_ref = menu.clone();
+        pin_btn.connect_clicked(move |_| {
+            menu_ref.popdown();
+            let mut ts = state.borrow_mut();
+            if let Some(entry) = ts.find_tab_mut(&tid) {
+                entry.pinned = !entry.pinned;
+                pin.set_label(if entry.pinned { "📌" } else { "" });
+                pin.set_visible(entry.pinned);
+                // Hide close button on pinned tabs
+                if let Some(close_widget) = &close {
+                    close_widget.set_visible(!entry.pinned);
+                }
+            }
+        });
+    }
+
+    // Close
+    let close_btn = gtk::Button::with_label("Close");
+    close_btn.add_css_class("flat");
+    {
+        let tid = tab_id.to_string();
+        let ts = tab_strip.clone();
+        let cs = content_stack.clone();
+        let state = tab_state.clone();
+        let cb = callbacks.clone();
+        let po = pane_outer.clone();
+        let menu_ref = menu.clone();
+        close_btn.connect_clicked(move |_| {
+            menu_ref.popdown();
+            remove_tab(&ts, &cs, &state, &tid, &cb, &po);
+        });
+    }
+
+    menu_box.append(&rename_btn);
+    menu_box.append(&pin_btn);
+    menu_box.append(&close_btn);
+    menu.set_child(Some(&menu_box));
+    menu.set_parent(tab_btn);
+    menu.set_has_arrow(false);
+
+    // Clean up popover when it closes
+    {
+        let tb = tab_btn.clone();
+        menu.connect_closed(move |popover| {
+            popover.unparent();
+        });
+    }
+
+    menu.popup();
+}
+
+fn show_rename_dialog(label: &gtk::Label, tab_state: &Rc<std::cell::RefCell<TabState>>, tab_id: &str) {
+    let current_name = label.label().to_string();
+
+    // Replace label with an entry temporarily
+    let parent = label.parent().and_then(|p| p.downcast::<gtk::Box>().ok());
+    let Some(parent) = parent else { return; };
+
+    let entry = gtk::Entry::builder()
+        .text(&current_name)
+        .width_chars(15)
+        .build();
+    entry.add_css_class("cmux-tab-rename-entry");
+
+    label.set_visible(false);
+    // Insert entry before the close button
+    parent.insert_child_after(&entry, Some(label));
+    entry.grab_focus();
+    entry.select_region(0, -1);
+
+    // On activate (Enter) or focus-out, commit rename
+    let lbl = label.clone();
+    let state = tab_state.clone();
+    let tid = tab_id.to_string();
+    let parent_for_cleanup = parent.clone();
+
+    let commit = Rc::new(std::cell::Cell::new(false));
+
+    let do_rename = {
+        let commit = commit.clone();
+        let lbl = lbl.clone();
+        let state = state.clone();
+        let tid = tid.clone();
+        let parent = parent_for_cleanup.clone();
+        move |entry: &gtk::Entry| {
+            if commit.get() { return; }
+            commit.set(true);
+            let new_name = entry.text().to_string();
+            if !new_name.trim().is_empty() {
+                lbl.set_label(&new_name);
+                let mut ts = state.borrow_mut();
+                if let Some(tab) = ts.find_tab_mut(&tid) {
+                    tab.custom_name = Some(new_name);
+                }
+            }
+            lbl.set_visible(true);
+            parent.remove(entry);
+        }
+    };
+
+    {
+        let do_rename = do_rename.clone();
+        entry.connect_activate(move |e| { do_rename(e); });
+    }
+    {
+        let do_rename = do_rename.clone();
+        let focus_controller = gtk::EventControllerFocus::new();
+        focus_controller.connect_leave(move |ctrl| {
+            if let Some(widget) = ctrl.widget() {
+                if let Some(entry) = widget.downcast_ref::<gtk::Entry>() {
+                    do_rename(entry);
+                }
+            }
+        });
+        entry.add_controller(focus_controller);
+    }
+}
+
+fn reorder_tab(tab_strip: &gtk::Box, tab_state: &Rc<std::cell::RefCell<TabState>>, source_id: &str, target_id: &str) {
+    let mut ts = tab_state.borrow_mut();
+
+    let Some(src_idx) = ts.tabs.iter().position(|e| e.id == source_id) else { return; };
+    let Some(tgt_idx) = ts.tabs.iter().position(|e| e.id == target_id) else { return; };
+
+    // Move the tab entry
+    let entry = ts.tabs.remove(src_idx);
+    let insert_at = if src_idx < tgt_idx { tgt_idx } else { tgt_idx };
+    ts.tabs.insert(insert_at, entry);
+
+    // Rebuild tab strip order
+    // Remove all tab buttons then re-add in order
+    let buttons: Vec<gtk::Box> = ts.tabs.iter().map(|e| e.tab_button.clone()).collect();
+    drop(ts);
+
+    for btn in &buttons {
+        tab_strip.remove(btn);
+    }
+    for btn in &buttons {
+        tab_strip.append(btn);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tab activation / removal
+// ---------------------------------------------------------------------------
+
+fn activate_tab(
+    tab_strip: &gtk::Box,
+    content_stack: &gtk::Stack,
+    tab_state: &Rc<std::cell::RefCell<TabState>>,
+    tab_id: &str,
+) {
+    let mut ts = tab_state.borrow_mut();
+    ts.active_tab = Some(tab_id.to_string());
+
+    // Update visual state on all tabs
+    for entry in &ts.tabs {
+        if entry.id == tab_id {
+            entry.tab_button.add_css_class("cmux-tab-active");
+        } else {
+            entry.tab_button.remove_css_class("cmux-tab-active");
+        }
+    }
+
+    content_stack.set_visible_child_name(tab_id);
+
+    // Focus the content — only grab focus on directly focusable widgets (terminals).
+    // For containers (browser vbox), focus the first focusable child instead.
+    if let Some(entry) = ts.tabs.iter().find(|e| e.id == tab_id) {
+        let content = entry.content.clone();
+        drop(ts);
+        if content.is_focus() || content.can_focus() {
+            content.grab_focus();
+        } else {
+            // Try to find a focusable child (e.g., the WebView inside a Box)
+            content.child_focus(gtk::DirectionType::TabForward);
+        }
+    }
+}
+
+fn remove_tab(
+    tab_strip: &gtk::Box,
+    content_stack: &gtk::Stack,
+    tab_state: &Rc<std::cell::RefCell<TabState>>,
+    tab_id: &str,
+    callbacks: &Rc<PaneCallbacks>,
+    pane_outer: &gtk::Box,
+) {
+    let mut ts = tab_state.borrow_mut();
+    let Some(idx) = ts.tabs.iter().position(|e| e.id == tab_id) else { return; };
+    let entry = ts.tabs.remove(idx);
+
+    tab_strip.remove(&entry.tab_button);
+    content_stack.remove(&entry.content);
+
+    if ts.tabs.is_empty() {
+        drop(ts);
+        (callbacks.on_empty)(&pane_outer.clone().upcast());
+        return;
+    }
+
+    // Activate neighbor tab
+    let new_idx = idx.min(ts.tabs.len() - 1);
+    let new_id = ts.tabs[new_idx].id.clone();
+    let was_active = ts.active_tab.as_deref() == Some(tab_id);
+    drop(ts);
+
+    if was_active {
+        activate_tab(tab_strip, content_stack, tab_state, &new_id);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Browser widget
+// ---------------------------------------------------------------------------
 
 #[cfg(feature = "webkit")]
 fn create_browser_widget() -> (gtk::Widget, String) {
     use webkit6::prelude::*;
-    use webkit6::WebView;
 
-    let webview = WebView::new();
-    webview.set_hexpand(true);
-    webview.set_vexpand(true);
-    webview.load_uri("https://google.com");
+    // Use a NetworkSession to avoid sandbox issues
+    let network_session = webkit6::NetworkSession::default();
+    let web_context = webkit6::WebContext::default();
 
-    // Wrap in a box with an address bar
+    let webview = webkit6::WebView::builder()
+        .hexpand(true)
+        .vexpand(true)
+        .build();
+
+    // Set permissive settings
+    if let Some(settings) = webkit6::prelude::WebViewExt::settings(&webview) {
+        use webkit6::prelude::SettingsExt;
+        settings.set_enable_developer_extras(true);
+        settings.set_javascript_can_open_windows_automatically(true);
+    }
+
     let url_entry = gtk::Entry::builder()
         .placeholder_text("Enter URL...")
         .hexpand(true)
         .build();
 
-    let back_btn = gtk::Button::builder().label("◀").build();
-    let fwd_btn = gtk::Button::builder().label("▶").build();
-    let reload_btn = gtk::Button::builder().label("⟳").build();
+    let back_btn = icon_button("go-previous-symbolic", "Back");
+    let fwd_btn = icon_button("go-next-symbolic", "Forward");
+    let reload_btn = icon_button("view-refresh-symbolic", "Reload");
 
     let nav_bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    nav_bar.add_css_class("cmux-pane-toolbar");
+    nav_bar.add_css_class("cmux-pane-header");
     nav_bar.append(&back_btn);
     nav_bar.append(&fwd_btn);
     nav_bar.append(&reload_btn);
     nav_bar.append(&url_entry);
 
-    // Wire navigation
     {
         let wv = webview.clone();
         back_btn.connect_clicked(move |_| { wv.go_back(); });
@@ -383,10 +923,9 @@ fn create_browser_widget() -> (gtk::Widget, String) {
             wv.load_uri(&url);
         });
     }
-    // Sync URL bar
     {
         let entry = url_entry.clone();
-        webview.connect_uri_notify(move |wv: &WebView| {
+        webview.connect_uri_notify(move |wv| {
             if let Some(uri) = wv.uri() {
                 let uri_str: String = uri.into();
                 entry.set_text(&uri_str);
@@ -396,9 +935,19 @@ fn create_browser_widget() -> (gtk::Widget, String) {
 
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
     vbox.append(&nav_bar);
-    vbox.append(&webview);
+    vbox.append(&webview.clone());
     vbox.set_hexpand(true);
     vbox.set_vexpand(true);
+
+    // Defer load_uri until after the widget is realized and mapped
+    let wv = webview.clone();
+    vbox.connect_map(move |_| {
+        wv.load_uri("https://google.com");
+    });
+
+    // Suppress unused variable warnings
+    let _ = network_session;
+    let _ = web_context;
 
     (vbox.upcast(), "Browser".to_string())
 }
@@ -412,67 +961,21 @@ fn create_browser_widget() -> (gtk::Widget, String) {
         .spacing(12)
         .build();
 
-    let icon = gtk::Label::builder()
-        .label("🌐")
-        .build();
-    icon.set_css_classes(&["title-1"]);
-
     let msg = gtk::Label::builder()
         .label("Browser requires webkit6")
         .build();
     msg.set_css_classes(&["dim-label"]);
 
     let hint = gtk::Label::builder()
-        .label("Install: sudo apt install libwebkitgtk-6.0-dev\nThen rebuild with: cargo build --features webkit")
+        .label("sudo apt install libwebkitgtk-6.0-dev\ncargo build --features webkit")
         .justify(gtk::Justification::Center)
         .build();
     hint.set_css_classes(&["dim-label"]);
 
-    placeholder.append(&icon);
     placeholder.append(&msg);
     placeholder.append(&hint);
     placeholder.set_hexpand(true);
     placeholder.set_vexpand(true);
 
     (placeholder.upcast(), "Browser".to_string())
-}
-
-// ---------------------------------------------------------------------------
-// Tab label with close button
-// ---------------------------------------------------------------------------
-
-/// Returns (container_box, title_label) — the label so callers can update the title.
-fn build_tab_label(
-    title: &str,
-    notebook: &gtk::Notebook,
-    tab_content: &gtk::Widget,
-) -> (gtk::Box, gtk::Label) {
-    let label = gtk::Label::builder()
-        .label(title)
-        .ellipsize(gtk::pango::EllipsizeMode::End)
-        .max_width_chars(20)
-        .build();
-
-    let close_btn = gtk::Button::builder()
-        .icon_name("window-close-symbolic")
-        .has_frame(false)
-        .build();
-    close_btn.set_css_classes(&["flat", "circular"]);
-
-    let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    hbox.append(&label);
-    hbox.append(&close_btn);
-
-    // Close button removes this tab
-    {
-        let nb = notebook.clone();
-        let content = tab_content.clone();
-        close_btn.connect_clicked(move |_| {
-            if let Some(page_num) = nb.page_num(&content) {
-                nb.remove_page(Some(page_num));
-            }
-        });
-    }
-
-    (hbox, label)
 }
