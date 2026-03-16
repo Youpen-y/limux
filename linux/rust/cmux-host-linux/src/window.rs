@@ -7,9 +7,7 @@ use gtk::glib;
 use libadwaita as adw;
 use adw::prelude::*;
 
-use vte4::TerminalExt;
-
-use crate::terminal;
+use crate::pane::{self, PaneCallbacks};
 
 // ---------------------------------------------------------------------------
 // State
@@ -20,25 +18,22 @@ struct Workspace {
     name: String,
     /// The root widget in the content stack for this workspace.
     root: gtk::Widget,
-    /// All VTE terminals in this workspace (flat list for focus tracking).
-    terminals: Vec<vte4::Terminal>,
     /// The sidebar row widget.
     sidebar_row: gtk::ListBoxRow,
+    /// Name label in sidebar row.
+    name_label: gtk::Label,
     /// Notification dot in the sidebar row.
     notify_dot: gtk::Label,
     /// Notification message label in the sidebar row.
     notify_label: gtk::Label,
     /// Whether this workspace has unread notifications.
     unread: bool,
-    /// Last notification message.
-    last_notification: Option<String>,
 }
 
 struct AppState {
     workspaces: Vec<Workspace>,
     active_idx: usize,
     next_number: usize,
-    // Widgets we need to mutate later
     stack: gtk::Stack,
     sidebar_list: gtk::ListBox,
     paned: gtk::Paned,
@@ -47,16 +42,6 @@ struct AppState {
 impl AppState {
     fn active_workspace(&self) -> Option<&Workspace> {
         self.workspaces.get(self.active_idx)
-    }
-
-    fn active_workspace_mut(&mut self) -> Option<&mut Workspace> {
-        self.workspaces.get_mut(self.active_idx)
-    }
-
-    fn focused_terminal(&self) -> Option<&vte4::Terminal> {
-        let ws = self.active_workspace()?;
-        ws.terminals.iter().find(|t| t.has_focus())
-            .or_else(|| ws.terminals.last())
     }
 }
 
@@ -74,9 +59,6 @@ const CSS: &str = r#"
     padding: 6px 12px;
     border-radius: 6px;
     margin: 2px 6px;
-}
-.cmux-sidebar-row-box:selected {
-    background-color: rgba(0, 145, 255, 0.25);
 }
 .cmux-ws-name {
     color: rgba(255, 255, 255, 0.7);
@@ -133,14 +115,14 @@ row:selected .cmux-ws-name {
 pub fn build_window(app: &adw::Application) {
     // Load CSS
     let provider = gtk::CssProvider::new();
-    provider.load_from_data(CSS);
+    let all_css = format!("{CSS}\n{}", pane::PANE_CSS);
+    provider.load_from_data(&all_css);
     gtk::style_context_add_provider_for_display(
         &gtk::gdk::Display::default().expect("display"),
         &provider,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
 
-    // Force dark theme
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
 
     let window = adw::ApplicationWindow::builder()
@@ -150,18 +132,15 @@ pub fn build_window(app: &adw::Application) {
         .default_height(900)
         .build();
 
-    // Header bar
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&gtk::Label::builder().label("cmux").build()));
 
-    // Content stack — one child per workspace
     let stack = gtk::Stack::new();
     stack.set_transition_type(gtk::StackTransitionType::None);
     stack.set_hexpand(true);
     stack.set_vexpand(true);
     stack.add_css_class("cmux-content");
 
-    // Sidebar
     let sidebar_list = gtk::ListBox::new();
     sidebar_list.set_selection_mode(gtk::SelectionMode::Single);
     sidebar_list.add_css_class("navigation-sidebar");
@@ -182,9 +161,7 @@ pub fn build_window(app: &adw::Application) {
         .build();
     sidebar_title.add_css_class("cmux-sidebar-title");
 
-    let new_ws_btn = gtk::Button::builder()
-        .label("New Workspace")
-        .build();
+    let new_ws_btn = gtk::Button::builder().label("New Workspace").build();
     new_ws_btn.add_css_class("cmux-sidebar-btn");
 
     let sidebar = gtk::Box::builder()
@@ -197,8 +174,7 @@ pub fn build_window(app: &adw::Application) {
     sidebar.append(&sidebar_scroll);
     sidebar.append(&new_ws_btn);
 
-    // Main horizontal split: sidebar | content
-    let paned = gtk::Paned::builder()
+    let main_paned = gtk::Paned::builder()
         .orientation(gtk::Orientation::Horizontal)
         .position(220)
         .shrink_start_child(false)
@@ -207,26 +183,23 @@ pub fn build_window(app: &adw::Application) {
         .end_child(&stack)
         .build();
 
-    // Assemble window
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
     vbox.append(&header);
-    vbox.append(&paned);
+    vbox.append(&main_paned);
     window.set_content(Some(&vbox));
 
-    // Shared state
     let state: State = Rc::new(RefCell::new(AppState {
         workspaces: Vec::new(),
         active_idx: 0,
         next_number: 1,
         stack: stack.clone(),
         sidebar_list: sidebar_list.clone(),
-        paned: paned.clone(),
+        paned: main_paned.clone(),
     }));
 
-    // Register window actions
     register_actions(&window, &state);
+    install_key_capture(&window, &state);
 
-    // Sidebar row selection → switch workspace
     {
         let state = state.clone();
         sidebar_list.connect_row_selected(move |_, row| {
@@ -237,7 +210,6 @@ pub fn build_window(app: &adw::Application) {
         });
     }
 
-    // "New Workspace" button
     {
         let state = state.clone();
         new_ws_btn.connect_clicked(move |_| {
@@ -245,9 +217,7 @@ pub fn build_window(app: &adw::Application) {
         });
     }
 
-    // Create first workspace
     add_workspace(&state, None);
-
     window.present();
 }
 
@@ -259,10 +229,7 @@ fn register_actions(window: &adw::ApplicationWindow, state: &State) {
     let action_defs: &[&str] = &[
         "new-workspace",
         "close-workspace",
-        "close-pane",
         "toggle-sidebar",
-        "split-right",
-        "split-down",
         "next-workspace",
         "prev-workspace",
     ];
@@ -275,10 +242,7 @@ fn register_actions(window: &adw::ApplicationWindow, state: &State) {
             match handler_name.as_str() {
                 "new-workspace" => add_workspace(&state, None),
                 "close-workspace" => close_workspace(&state),
-                "close-pane" => close_focused_pane(&state),
                 "toggle-sidebar" => toggle_sidebar(&state),
-                "split-right" => split(&state, gtk::Orientation::Horizontal),
-                "split-down" => split(&state, gtk::Orientation::Vertical),
                 "next-workspace" => cycle_workspace(&state, 1),
                 "prev-workspace" => cycle_workspace(&state, -1),
                 _ => {}
@@ -288,16 +252,122 @@ fn register_actions(window: &adw::ApplicationWindow, state: &State) {
     }
 }
 
+/// Intercept keyboard shortcuts in the CAPTURE phase so VTE doesn't eat them.
+fn install_key_capture(window: &adw::ApplicationWindow, state: &State) {
+    use gtk::gdk;
+
+    let key_controller = gtk::EventControllerKey::new();
+    key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
+
+    let state = state.clone();
+    key_controller.connect_key_pressed(move |_, keyval, _keycode, modifier| {
+        let ctrl = modifier.contains(gdk::ModifierType::CONTROL_MASK);
+        let shift = modifier.contains(gdk::ModifierType::SHIFT_MASK);
+
+        // Strip lock keys (CapsLock, NumLock) from comparison
+        let matched = match (ctrl, shift, keyval) {
+            // Ctrl+Shift+N → new workspace
+            (true, true, gdk::Key::N | gdk::Key::n) => {
+                add_workspace(&state, None);
+                true
+            }
+            // Ctrl+Shift+W → close workspace
+            (true, true, gdk::Key::W | gdk::Key::w) => {
+                close_workspace(&state);
+                true
+            }
+            // Ctrl+Shift+D → split down
+            (true, true, gdk::Key::D | gdk::Key::d) => {
+                split_focused_pane(&state, gtk::Orientation::Vertical);
+                true
+            }
+            // Ctrl+Shift+T → new terminal tab in focused pane
+            (true, true, gdk::Key::T | gdk::Key::t) => {
+                add_tab_to_focused_pane(&state, false);
+                true
+            }
+            // Ctrl+D → split right
+            (true, false, gdk::Key::d) => {
+                split_focused_pane(&state, gtk::Orientation::Horizontal);
+                true
+            }
+            // Ctrl+W → close focused tab/pane
+            (true, false, gdk::Key::w) => {
+                close_focused_tab(&state);
+                true
+            }
+            // Ctrl+B → toggle sidebar
+            (true, false, gdk::Key::b) => {
+                toggle_sidebar(&state);
+                true
+            }
+            // Ctrl+T → new terminal tab
+            (true, false, gdk::Key::t) => {
+                add_tab_to_focused_pane(&state, false);
+                true
+            }
+            // Ctrl+PageDown → next workspace
+            (true, false, gdk::Key::Page_Down) => {
+                cycle_workspace(&state, 1);
+                true
+            }
+            // Ctrl+PageUp → prev workspace
+            (true, false, gdk::Key::Page_Up) => {
+                cycle_workspace(&state, -1);
+                true
+            }
+            // Ctrl+1-9 → switch to workspace by index
+            (true, false, key) => {
+                let digit = match key {
+                    gdk::Key::_1 => Some(0usize),
+                    gdk::Key::_2 => Some(1),
+                    gdk::Key::_3 => Some(2),
+                    gdk::Key::_4 => Some(3),
+                    gdk::Key::_5 => Some(4),
+                    gdk::Key::_6 => Some(5),
+                    gdk::Key::_7 => Some(6),
+                    gdk::Key::_8 => Some(7),
+                    gdk::Key::_9 => {
+                        // Ctrl+9 always goes to last workspace
+                        let s = state.borrow();
+                        if s.workspaces.is_empty() { None }
+                        else { Some(s.workspaces.len() - 1) }
+                    }
+                    _ => None,
+                };
+                if let Some(idx) = digit {
+                    let row_and_list = {
+                        let s = state.borrow();
+                        s.workspaces.get(idx).map(|ws| (ws.sidebar_row.clone(), s.sidebar_list.clone()))
+                    };
+                    switch_workspace(&state, idx);
+                    if let Some((row, list)) = row_and_list {
+                        list.select_row(Some(&row));
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+
+        if matched {
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+
+    window.add_controller(key_controller);
+}
+
 // ---------------------------------------------------------------------------
-// Sidebar row construction
+// Sidebar row
 // ---------------------------------------------------------------------------
 
-/// Build a sidebar row with: [dot] [name]
-///                            [notification message]
 fn build_sidebar_row(name: &str) -> (gtk::ListBoxRow, gtk::Label, gtk::Label, gtk::Label) {
-    let notify_dot = gtk::Label::builder()
-        .label("\u{25CF}") // ●
-        .build();
+    let notify_dot = gtk::Label::builder().label("\u{25CF}").build();
     notify_dot.add_css_class("cmux-notify-dot-hidden");
 
     let name_label = gtk::Label::builder()
@@ -316,7 +386,7 @@ fn build_sidebar_row(name: &str) -> (gtk::ListBoxRow, gtk::Label, gtk::Label, gt
         .xalign(0.0)
         .ellipsize(gtk::pango::EllipsizeMode::End)
         .visible(false)
-        .margin_start(16) // indent under name
+        .margin_start(16)
         .build();
     notify_label.add_css_class("cmux-notify-msg");
 
@@ -347,112 +417,68 @@ fn add_workspace(state: &State, working_directory: Option<&str>) {
     let name = format!("Terminal {number}");
     let stack_name = format!("ws-{id}");
 
-    // Create terminal
-    let term = terminal::create_terminal(working_directory);
+    // Create the initial pane for this workspace
+    let pane_widget = create_pane_for_workspace(state, &id, working_directory);
+    let root: gtk::Widget = pane_widget.upcast();
 
-    // Connect signals for this terminal
-    connect_terminal_signals(state, &term, &id);
-
-    let root: gtk::Widget = term.clone().upcast();
-
-    // Add to stack
     s.stack.add_named(&root, Some(&stack_name));
 
-    // Create sidebar row
     let (row, name_label, notify_dot, notify_label) = build_sidebar_row(&name);
     s.sidebar_list.append(&row);
 
-    // Keep reference to the name_label for title updates
-    let name_label_for_title = name_label.clone();
-
     let ws = Workspace {
-        id: id.clone(),
+        id,
         name,
         root,
-        terminals: vec![term.clone()],
         sidebar_row: row.clone(),
+        name_label,
         notify_dot,
         notify_label,
         unread: false,
-        last_notification: None,
     };
 
     s.workspaces.push(ws);
     let new_idx = s.workspaces.len() - 1;
     s.active_idx = new_idx;
-
     s.stack.set_visible_child_name(&stack_name);
 
     let sidebar_list = s.sidebar_list.clone();
-    let term_to_focus = s.workspaces[new_idx].terminals.first().cloned();
     drop(s);
 
     sidebar_list.select_row(Some(&row));
-
-    // Sync terminal title to workspace name
-    {
-        let state = state.clone();
-        let id = id.clone();
-        term.connect_window_title_notify(move |t: &vte4::Terminal| {
-            if let Some(title) = t.window_title() {
-                let title_str: String = title.into();
-                if !title_str.is_empty() {
-                    let mut s = state.borrow_mut();
-                    if let Some(ws) = s.workspaces.iter_mut().find(|w| w.id == id) {
-                        ws.name = title_str.clone();
-                        name_label_for_title.set_label(&title_str);
-                    }
-                }
-            }
-        });
-    }
-
-    if let Some(t) = term_to_focus {
-        t.grab_focus();
-    }
 }
 
-/// Connect bell (notification) and eof signals for a terminal.
-fn connect_terminal_signals(state: &State, term: &vte4::Terminal, ws_id: &str) {
-    // Bell → notification alert
-    {
-        let state = state.clone();
-        let ws_id = ws_id.to_string();
-        term.connect_bell(move |_: &vte4::Terminal| {
-            let mut s = state.borrow_mut();
-            let active_idx = s.active_idx;
-            if let Some((idx, ws)) = s.workspaces.iter_mut().enumerate().find(|(_, w)| w.id == ws_id) {
-                // Only mark as unread if this is NOT the active workspace
-                if idx != active_idx {
-                    ws.unread = true;
-                    ws.last_notification = Some("Process needs attention".to_string());
+/// Create a PaneWidget wired up with callbacks for a specific workspace.
+fn create_pane_for_workspace(
+    state: &State,
+    ws_id: &str,
+    working_directory: Option<&str>,
+) -> gtk::Box {
+    let state_for_split = state.clone();
+    let state_for_close = state.clone();
+    let state_for_bell = state.clone();
+    let state_for_empty = state.clone();
+    let ws_id_split = ws_id.to_string();
+    let ws_id_close = ws_id.to_string();
+    let ws_id_bell = ws_id.to_string();
+    let ws_id_empty = ws_id.to_string();
 
-                    // Update sidebar visuals
-                    ws.notify_dot.remove_css_class("cmux-notify-dot-hidden");
-                    ws.notify_dot.add_css_class("cmux-notify-dot");
+    let callbacks = Rc::new(PaneCallbacks {
+        on_split: Box::new(move |pane_widget, orientation| {
+            split_pane(&state_for_split, &ws_id_split, pane_widget, orientation);
+        }),
+        on_close_pane: Box::new(move |pane_widget| {
+            remove_pane(&state_for_close, &ws_id_close, pane_widget);
+        }),
+        on_bell: Box::new(move || {
+            mark_workspace_unread(&state_for_bell, &ws_id_bell);
+        }),
+        on_empty: Box::new(move |pane_widget| {
+            remove_pane(&state_for_empty, &ws_id_empty, pane_widget);
+        }),
+    });
 
-                    ws.notify_label.set_label("Process needs attention");
-                    ws.notify_label.remove_css_class("cmux-notify-msg");
-                    ws.notify_label.add_css_class("cmux-notify-msg-unread");
-                    ws.notify_label.set_visible(true);
-                }
-            }
-        });
-    }
-
-    // Child exit → close terminal/workspace
-    {
-        let state = state.clone();
-        let ws_id = ws_id.to_string();
-        term.connect_child_exited(move |t: &vte4::Terminal, _status: i32| {
-            let t = t.clone();
-            let state = state.clone();
-            let ws_id = ws_id.clone();
-            glib::idle_add_local_once(move || {
-                remove_terminal_from_workspace(&state, &ws_id, &t);
-            });
-        });
-    }
+    pane::create_pane(callbacks, working_directory)
 }
 
 fn close_workspace(state: &State) {
@@ -472,7 +498,6 @@ fn close_workspace_by_id(state: &State, id: &str) {
     };
 
     let ws = s.workspaces.remove(idx);
-
     s.stack.remove(&ws.root);
     s.sidebar_list.remove(&ws.sidebar_row);
 
@@ -486,11 +511,7 @@ fn close_workspace_by_id(state: &State, id: &str) {
         return;
     }
 
-    let new_idx = if idx >= s.workspaces.len() {
-        s.workspaces.len() - 1
-    } else {
-        idx
-    };
+    let new_idx = idx.min(s.workspaces.len() - 1);
     s.active_idx = new_idx;
 
     let stack_name = format!("ws-{}", s.workspaces[new_idx].id);
@@ -498,63 +519,28 @@ fn close_workspace_by_id(state: &State, id: &str) {
 
     let row = s.workspaces[new_idx].sidebar_row.clone();
     let sidebar_list = s.sidebar_list.clone();
-    let term = s.workspaces[new_idx].terminals.first().cloned();
     drop(s);
 
     sidebar_list.select_row(Some(&row));
-    if let Some(t) = term {
-        t.grab_focus();
-    }
-}
-
-/// Close the focused pane (terminal) in the active workspace.
-fn close_focused_pane(state: &State) {
-    let (ws_id, term) = {
-        let s = state.borrow();
-        let ws = match s.active_workspace() {
-            Some(ws) => ws,
-            None => return,
-        };
-        // If only one terminal, close the whole workspace
-        if ws.terminals.len() <= 1 {
-            let id = ws.id.clone();
-            drop(s);
-            close_workspace_by_id(state, &id);
-            return;
-        }
-        let term = s.focused_terminal().cloned();
-        (ws.id.clone(), term)
-    };
-    if let Some(term) = term {
-        remove_terminal_from_workspace(state, &ws_id, &term);
-    }
 }
 
 fn switch_workspace(state: &State, idx: usize) {
-    let term = {
-        let mut s = state.borrow_mut();
-        if idx >= s.workspaces.len() || idx == s.active_idx {
-            return;
-        }
-        s.active_idx = idx;
-        let stack_name = format!("ws-{}", s.workspaces[idx].id);
-        s.stack.set_visible_child_name(&stack_name);
+    let mut s = state.borrow_mut();
+    if idx >= s.workspaces.len() || idx == s.active_idx {
+        return;
+    }
+    s.active_idx = idx;
+    let stack_name = format!("ws-{}", s.workspaces[idx].id);
+    s.stack.set_visible_child_name(&stack_name);
 
-        // Clear unread state when switching TO this workspace
-        let ws = &mut s.workspaces[idx];
-        if ws.unread {
-            ws.unread = false;
-            ws.notify_dot.remove_css_class("cmux-notify-dot");
-            ws.notify_dot.add_css_class("cmux-notify-dot-hidden");
-            ws.notify_label.remove_css_class("cmux-notify-msg-unread");
-            ws.notify_label.add_css_class("cmux-notify-msg");
-        }
-
-        s.workspaces[idx].terminals.first().cloned()
-    };
-
-    if let Some(t) = term {
-        t.grab_focus();
+    // Clear unread
+    let ws = &mut s.workspaces[idx];
+    if ws.unread {
+        ws.unread = false;
+        ws.notify_dot.remove_css_class("cmux-notify-dot");
+        ws.notify_dot.add_css_class("cmux-notify-dot-hidden");
+        ws.notify_label.remove_css_class("cmux-notify-msg-unread");
+        ws.notify_label.add_css_class("cmux-notify-msg");
     }
 }
 
@@ -562,13 +548,9 @@ fn cycle_workspace(state: &State, direction: i32) {
     let (new_idx, row, sidebar_list) = {
         let s = state.borrow();
         let len = s.workspaces.len();
-        if len <= 1 {
-            return;
-        }
+        if len <= 1 { return; }
         let new_idx = ((s.active_idx as i32 + direction).rem_euclid(len as i32)) as usize;
-        let row = s.workspaces[new_idx].sidebar_row.clone();
-        let sidebar_list = s.sidebar_list.clone();
-        (new_idx, row, sidebar_list)
+        (new_idx, s.workspaces[new_idx].sidebar_row.clone(), s.sidebar_list.clone())
     };
     switch_workspace(state, new_idx);
     sidebar_list.select_row(Some(&row));
@@ -576,71 +558,24 @@ fn cycle_workspace(state: &State, direction: i32) {
 
 fn toggle_sidebar(state: &State) {
     let s = state.borrow();
-    let start = s.paned.start_child();
-    if let Some(sidebar) = start {
-        let visible = sidebar.is_visible();
-        sidebar.set_visible(!visible);
+    if let Some(sidebar) = s.paned.start_child() {
+        sidebar.set_visible(!sidebar.is_visible());
     }
 }
 
 // ---------------------------------------------------------------------------
-// Split panes
+// Split / close pane operations
 // ---------------------------------------------------------------------------
 
-fn split(state: &State, orientation: gtk::Orientation) {
-    let mut s = state.borrow_mut();
-    let ws = match s.active_workspace_mut() {
-        Some(ws) => ws,
-        None => return,
-    };
+fn split_pane(
+    state: &State,
+    ws_id: &str,
+    pane_widget: &gtk::Widget,
+    orientation: gtk::Orientation,
+) {
+    let new_pane = create_pane_for_workspace(state, ws_id, None);
 
-    let focused_idx = ws.terminals.iter().position(|t| t.has_focus())
-        .unwrap_or(ws.terminals.len().saturating_sub(1));
-
-    let focused_term = match ws.terminals.get(focused_idx) {
-        Some(t) => t.clone(),
-        None => return,
-    };
-
-    let new_term = terminal::create_terminal(None);
-
-    // Connect signals for the new terminal
-    let ws_id = ws.id.clone();
-    // We can't call connect_terminal_signals while s is borrowed, so do it inline
-    {
-        let state_clone = Rc::clone(state);
-        let ws_id2 = ws_id.clone();
-        new_term.connect_bell(move |_: &vte4::Terminal| {
-            let mut s = state_clone.borrow_mut();
-            let active_idx = s.active_idx;
-            if let Some((idx, ws)) = s.workspaces.iter_mut().enumerate().find(|(_, w)| w.id == ws_id2) {
-                if idx != active_idx {
-                    ws.unread = true;
-                    ws.last_notification = Some("Process needs attention".to_string());
-                    ws.notify_dot.remove_css_class("cmux-notify-dot-hidden");
-                    ws.notify_dot.add_css_class("cmux-notify-dot");
-                    ws.notify_label.set_label("Process needs attention");
-                    ws.notify_label.remove_css_class("cmux-notify-msg");
-                    ws.notify_label.add_css_class("cmux-notify-msg-unread");
-                    ws.notify_label.set_visible(true);
-                }
-            }
-        });
-    }
-    {
-        let state_clone = Rc::clone(state);
-        let ws_id2 = ws_id.clone();
-        new_term.connect_child_exited(move |t: &vte4::Terminal, _status: i32| {
-            let t = t.clone();
-            let state_clone = state_clone.clone();
-            let ws_id2 = ws_id2.clone();
-            glib::idle_add_local_once(move || {
-                remove_terminal_from_workspace(&state_clone, &ws_id2, &t);
-            });
-        });
-    }
-
-    let parent = focused_term.parent();
+    let parent = pane_widget.parent();
 
     let new_paned = gtk::Paned::builder()
         .orientation(orientation)
@@ -651,27 +586,30 @@ fn split(state: &State, orientation: gtk::Orientation) {
     if let Some(parent) = parent {
         if let Some(paned_parent) = parent.downcast_ref::<gtk::Paned>() {
             let is_start = paned_parent.start_child()
-                .map(|c| c == focused_term.clone().upcast::<gtk::Widget>())
+                .map(|c| c == *pane_widget)
                 .unwrap_or(false);
-
             if is_start {
                 paned_parent.set_start_child(Some(&new_paned));
             } else {
                 paned_parent.set_end_child(Some(&new_paned));
             }
         } else if let Some(stack) = parent.downcast_ref::<gtk::Stack>() {
-            let page_name = format!("ws-{}", ws_id);
-            stack.remove(&focused_term);
+            let page_name = format!("ws-{ws_id}");
+            stack.remove(pane_widget);
             stack.add_named(&new_paned, Some(&page_name));
             stack.set_visible_child_name(&page_name);
-            ws.root = new_paned.clone().upcast();
+            // Update root reference
+            let mut s = state.borrow_mut();
+            if let Some(ws) = s.workspaces.iter_mut().find(|w| w.id == ws_id) {
+                ws.root = new_paned.clone().upcast();
+            }
         }
     }
 
-    new_paned.set_start_child(Some(&focused_term));
-    new_paned.set_end_child(Some(&new_term));
+    new_paned.set_start_child(Some(pane_widget));
+    new_paned.set_end_child(Some(&new_pane));
 
-    // Set split position to 50% after layout
+    // 50% split after layout
     {
         let np = new_paned.clone();
         glib::idle_add_local_once(move || {
@@ -681,75 +619,165 @@ fn split(state: &State, orientation: gtk::Orientation) {
             } else {
                 alloc.height()
             };
-            if size > 0 {
-                np.set_position(size / 2);
-            }
+            if size > 0 { np.set_position(size / 2); }
         });
     }
-
-    ws.terminals.push(new_term.clone());
-
-    drop(s);
-    new_term.grab_focus();
 }
 
-fn remove_terminal_from_workspace(state: &State, ws_id: &str, term: &vte4::Terminal) {
-    let mut s = state.borrow_mut();
-    let ws = match s.workspaces.iter_mut().find(|w| w.id == ws_id) {
-        Some(ws) => ws,
-        None => return,
-    };
+fn remove_pane(state: &State, ws_id: &str, pane_widget: &gtk::Widget) {
+    let parent = pane_widget.parent();
 
-    ws.terminals.retain(|t| t != term);
+    let Some(parent) = parent else { return; };
 
-    if ws.terminals.is_empty() {
-        let id = ws.id.clone();
-        drop(s);
-        close_workspace_by_id(state, &id);
-        return;
-    }
+    if let Some(paned) = parent.downcast_ref::<gtk::Paned>() {
+        // Find sibling
+        let sibling = if paned.start_child().map(|c| c == *pane_widget).unwrap_or(false) {
+            paned.end_child()
+        } else {
+            paned.start_child()
+        };
 
-    let term_widget: gtk::Widget = term.clone().upcast();
-    if let Some(parent) = term_widget.parent() {
-        if let Some(paned) = parent.downcast_ref::<gtk::Paned>() {
-            let sibling = if paned.start_child()
-                .map(|c| c == term_widget)
-                .unwrap_or(false)
-            {
-                paned.end_child()
-            } else {
-                paned.start_child()
-            };
+        if let Some(sibling) = sibling {
+            paned.set_start_child(gtk::Widget::NONE);
+            paned.set_end_child(gtk::Widget::NONE);
 
-            if let Some(sibling) = sibling {
-                if let Some(grandparent) = paned.parent() {
-                    paned.set_start_child(gtk::Widget::NONE);
-                    paned.set_end_child(gtk::Widget::NONE);
-
-                    if let Some(gp_paned) = grandparent.downcast_ref::<gtk::Paned>() {
-                        let is_start = gp_paned.start_child()
-                            .map(|c| c == paned.clone().upcast::<gtk::Widget>())
-                            .unwrap_or(false);
-                        if is_start {
-                            gp_paned.set_start_child(Some(&sibling));
-                        } else {
-                            gp_paned.set_end_child(Some(&sibling));
-                        }
-                    } else if let Some(stack) = grandparent.downcast_ref::<gtk::Stack>() {
-                        let page_name = format!("ws-{}", ws.id);
-                        stack.remove(paned);
-                        stack.add_named(&sibling, Some(&page_name));
-                        stack.set_visible_child_name(&page_name);
+            if let Some(grandparent) = paned.parent() {
+                if let Some(gp_paned) = grandparent.downcast_ref::<gtk::Paned>() {
+                    let is_start = gp_paned.start_child()
+                        .map(|c| c == paned.clone().upcast::<gtk::Widget>())
+                        .unwrap_or(false);
+                    if is_start {
+                        gp_paned.set_start_child(Some(&sibling));
+                    } else {
+                        gp_paned.set_end_child(Some(&sibling));
+                    }
+                } else if let Some(stack) = grandparent.downcast_ref::<gtk::Stack>() {
+                    let page_name = format!("ws-{ws_id}");
+                    stack.remove(paned);
+                    stack.add_named(&sibling, Some(&page_name));
+                    stack.set_visible_child_name(&page_name);
+                    let mut s = state.borrow_mut();
+                    if let Some(ws) = s.workspaces.iter_mut().find(|w| w.id == ws_id) {
                         ws.root = sibling.clone();
                     }
                 }
             }
         }
+    } else if parent.downcast_ref::<gtk::Stack>().is_some() {
+        // This is the only pane in the workspace — close the workspace
+        close_workspace_by_id(state, ws_id);
+    }
+}
+
+/// Find the focused pane widget (a gtk::Box with class cmux-pane-toolbar child)
+/// by walking up from the currently focused widget.
+fn find_focused_pane(state: &State) -> Option<(String, gtk::Widget)> {
+    let (ws_id, root, stack) = {
+        let s = state.borrow();
+        let ws = s.active_workspace()?;
+        (ws.id.clone(), ws.root.clone(), s.stack.clone())
+    };
+
+    // Get the window's focus widget and walk up to find a pane Box
+    let window = stack.root()?.downcast::<gtk::Window>().ok()?;
+    let focus = gtk::prelude::GtkWindowExt::focus(&window)?;
+
+    let mut widget: Option<gtk::Widget> = Some(focus);
+    while let Some(w) = widget {
+        if let Some(bx) = w.downcast_ref::<gtk::Box>() {
+            let mut child = bx.first_child();
+            while let Some(c) = child {
+                if c.has_css_class("cmux-pane-toolbar") {
+                    return Some((ws_id, w));
+                }
+                child = c.next_sibling();
+            }
+        }
+        widget = w.parent();
     }
 
-    if let Some(t) = ws.terminals.first() {
-        let t = t.clone();
-        drop(s);
-        t.grab_focus();
+    Some((ws_id, root))
+}
+
+/// Find the GtkNotebook inside a pane widget.
+fn find_notebook_in_pane(pane_widget: &gtk::Widget) -> Option<gtk::Notebook> {
+    if let Some(bx) = pane_widget.downcast_ref::<gtk::Box>() {
+        let mut child = bx.first_child();
+        while let Some(c) = child {
+            if let Ok(nb) = c.clone().downcast::<gtk::Notebook>() {
+                return Some(nb);
+            }
+            child = c.next_sibling();
+        }
+    }
+    None
+}
+
+fn split_focused_pane(state: &State, orientation: gtk::Orientation) {
+    if let Some((ws_id, pane_widget)) = find_focused_pane(state) {
+        split_pane(state, &ws_id, &pane_widget, orientation);
+    }
+}
+
+fn close_focused_tab(state: &State) {
+    if let Some((ws_id, pane_widget)) = find_focused_pane(state) {
+        if let Some(notebook) = find_notebook_in_pane(&pane_widget) {
+            if notebook.n_pages() > 1 {
+                // Close current tab
+                if let Some(page_num) = notebook.current_page() {
+                    notebook.remove_page(Some(page_num));
+                }
+            } else {
+                // Only one tab — close the whole pane
+                remove_pane(state, &ws_id, &pane_widget);
+            }
+        }
+    }
+}
+
+fn add_tab_to_focused_pane(state: &State, browser: bool) {
+    if let Some((ws_id, pane_widget)) = find_focused_pane(state) {
+        if let Some(notebook) = find_notebook_in_pane(&pane_widget) {
+            if browser {
+                pane::add_browser_tab(&notebook);
+            } else {
+                let callbacks = make_pane_callbacks(state, &ws_id);
+                pane::add_terminal_tab(&notebook, None, &callbacks);
+            }
+        }
+    }
+}
+
+fn make_pane_callbacks(state: &State, ws_id: &str) -> Rc<PaneCallbacks> {
+    let s1 = state.clone();
+    let s2 = state.clone();
+    let s3 = state.clone();
+    let s4 = state.clone();
+    let id1 = ws_id.to_string();
+    let id2 = ws_id.to_string();
+    let id3 = ws_id.to_string();
+    let id4 = ws_id.to_string();
+
+    Rc::new(PaneCallbacks {
+        on_split: Box::new(move |pw, o| split_pane(&s1, &id1, pw, o)),
+        on_close_pane: Box::new(move |pw| remove_pane(&s2, &id2, pw)),
+        on_bell: Box::new(move || mark_workspace_unread(&s3, &id3)),
+        on_empty: Box::new(move |pw| remove_pane(&s4, &id4, pw)),
+    })
+}
+
+fn mark_workspace_unread(state: &State, ws_id: &str) {
+    let mut s = state.borrow_mut();
+    let active_idx = s.active_idx;
+    if let Some((idx, ws)) = s.workspaces.iter_mut().enumerate().find(|(_, w)| w.id == ws_id) {
+        if idx != active_idx {
+            ws.unread = true;
+            ws.notify_dot.remove_css_class("cmux-notify-dot-hidden");
+            ws.notify_dot.add_css_class("cmux-notify-dot");
+            ws.notify_label.set_label("Process needs attention");
+            ws.notify_label.remove_css_class("cmux-notify-msg");
+            ws.notify_label.add_css_class("cmux-notify-msg-unread");
+            ws.notify_label.set_visible(true);
+        }
     }
 }
