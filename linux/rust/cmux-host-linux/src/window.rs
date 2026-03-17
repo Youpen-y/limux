@@ -307,10 +307,9 @@ fn register_actions(window: &adw::ApplicationWindow, state: &State) {
     }
 }
 
-/// Intercept keyboard shortcuts in the CAPTURE phase so VTE doesn't eat them.
+/// Intercept keyboard shortcuts in the CAPTURE phase for window-level bindings.
 fn install_key_capture(window: &adw::ApplicationWindow, state: &State) {
     use gtk::gdk;
-    use vte4::TerminalExt;
 
     let key_controller = gtk::EventControllerKey::new();
     key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -319,25 +318,6 @@ fn install_key_capture(window: &adw::ApplicationWindow, state: &State) {
     key_controller.connect_key_pressed(move |_, keyval, _keycode, modifier| {
         let ctrl = modifier.contains(gdk::ModifierType::CONTROL_MASK);
         let shift = modifier.contains(gdk::ModifierType::SHIFT_MASK);
-
-        // Shift+Enter → feed kitty keyboard protocol sequence to VTE.
-        // VTE doesn't distinguish Shift+Enter from Enter by default,
-        // but apps like Claude Code and Codex need \x1b[13;2u for "newline without submit".
-        if !ctrl && shift && keyval == gdk::Key::Return {
-            // Find the focused VTE terminal and feed the escape sequence
-            let stack = state.borrow().stack.clone();
-            if let Some(root) = stack.root() {
-                if let Ok(window) = root.downcast::<gtk::Window>() {
-                    if let Some(focus) = gtk::prelude::GtkWindowExt::focus(&window) {
-                        if let Some(term) = focus.downcast_ref::<vte4::Terminal>() {
-                            // CSI 13;2u = kitty protocol for Shift+Enter
-                            term.feed_child(b"\x1b[13;2u");
-                            return glib::Propagation::Stop;
-                        }
-                    }
-                }
-            }
-        }
 
         let matched = match (ctrl, shift, keyval) {
             // Ctrl+Shift+N → new workspace

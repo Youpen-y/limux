@@ -10,9 +10,7 @@ use gtk4 as gtk;
 use gtk::prelude::*;
 use gtk::glib;
 
-use vte4::TerminalExt;
-
-use crate::terminal;
+use crate::terminal::{self, TerminalCallbacks};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -324,61 +322,56 @@ fn add_terminal_tab_inner(
     working_directory: Option<&str>,
     pane_outer: &gtk::Box,
 ) {
-    let term = terminal::create_terminal(working_directory);
     let tab_id = next_tab_id();
-
-    // Bell notification
-    {
-        let cb = callbacks.clone();
-        term.connect_bell(move |_: &vte4::Terminal| {
-            (cb.on_bell)();
-        });
-    }
 
     // Tab label button
     let (tab_btn, title_label) = build_tab_button("Terminal", &tab_id, tab_strip, content_stack, tab_state, callbacks, pane_outer);
 
-    // Update tab label from terminal title (only if no custom name set)
-    {
+    // Build Ghostty terminal callbacks for title/bell/close
+    let term_callbacks = {
         let tl = title_label.clone();
-        let state = tab_state.clone();
-        let tid = tab_id.clone();
-        term.connect_window_title_notify(move |t: &vte4::Terminal| {
-            // Skip if user set a custom name
-            let has_custom = state.borrow().tabs.iter()
-                .any(|e| e.id == tid && e.custom_name.is_some());
-            if has_custom { return; }
-
-            if let Some(title) = t.window_title() {
-                let s: String = title.into();
-                if !s.is_empty() {
-                    let display = if s.len() > 22 { format!("{}…", &s[..21]) } else { s };
-                    tl.set_label(&display);
-                }
-            }
-        });
-    }
-
-    // On child exit, remove tab
-    {
+        let state_for_title = tab_state.clone();
+        let tid_for_title = tab_id.clone();
+        let cb_bell = callbacks.clone();
         let ts = tab_strip.clone();
         let cs = content_stack.clone();
-        let state = tab_state.clone();
-        let tid = tab_id.clone();
-        let cb = callbacks.clone();
+        let state_for_close = tab_state.clone();
+        let tid_for_close = tab_id.clone();
+        let cb_close = callbacks.clone();
         let po = pane_outer.clone();
-        term.connect_child_exited(move |_: &vte4::Terminal, _status: i32| {
-            let ts = ts.clone();
-            let cs = cs.clone();
-            let state = state.clone();
-            let tid = tid.clone();
-            let cb = cb.clone();
-            let po = po.clone();
-            glib::idle_add_local_once(move || {
-                remove_tab(&ts, &cs, &state, &tid, &cb, &po);
-            });
-        });
-    }
+
+        TerminalCallbacks {
+            on_title_changed: Box::new(move |title: &str| {
+                let has_custom = state_for_title.borrow().tabs.iter()
+                    .any(|e| e.id == tid_for_title && e.custom_name.is_some());
+                if has_custom { return; }
+                if !title.is_empty() {
+                    let display = if title.len() > 22 {
+                        format!("{}…", &title[..21])
+                    } else {
+                        title.to_string()
+                    };
+                    tl.set_label(&display);
+                }
+            }),
+            on_bell: Box::new(move || {
+                (cb_bell.on_bell)();
+            }),
+            on_close: Box::new(move || {
+                let ts = ts.clone();
+                let cs = cs.clone();
+                let state = state_for_close.clone();
+                let tid = tid_for_close.clone();
+                let cb = cb_close.clone();
+                let po = po.clone();
+                glib::idle_add_local_once(move || {
+                    remove_tab(&ts, &cs, &state, &tid, &cb, &po);
+                });
+            }),
+        }
+    };
+
+    let term = terminal::create_terminal(working_directory, term_callbacks);
 
     let widget: gtk::Widget = term.clone().upcast();
     content_stack.add_named(&widget, Some(&tab_id));
@@ -388,7 +381,7 @@ fn add_terminal_tab_inner(
         ts.tabs.push(TabEntry {
             id: tab_id.clone(),
             tab_button: tab_btn,
-            title_label: title_label,
+            title_label,
             content: widget,
             custom_name: None,
             pinned: false,

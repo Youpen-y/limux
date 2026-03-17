@@ -4,6 +4,7 @@ members = [
   "rust/cmux-core",
   "rust/cmux-control",
   "rust/cmux-cli",
+  "rust/cmux-ghostty-sys",
   "rust/cmux-host-linux",
 ]
 resolver = "2"
