@@ -247,6 +247,7 @@ pub fn create_pane(callbacks: Rc<PaneCallbacks>, working_directory: Option<&str>
 struct TabEntry {
     id: String,
     tab_button: gtk::Box,
+    #[allow(dead_code)]
     title_label: gtk::Label,
     content: gtk::Widget,
     custom_name: Option<String>,
@@ -284,6 +285,7 @@ fn icon_button(icon_name: &str, tooltip: &str) -> gtk::Button {
 
 /// Create a split-pane icon button with two rectangles separated by a divider.
 /// Horizontal = left|right panes, Vertical = top/bottom panes.
+#[allow(dead_code)]
 fn split_icon_button(orientation: gtk::Orientation, tooltip: &str) -> gtk::Button {
     let icon = gtk::Box::new(orientation, 1);
     icon.add_css_class("cmux-split-icon");
@@ -447,6 +449,7 @@ fn add_browser_tab_inner(
 }
 
 // Public wrappers for keyboard shortcut use
+#[allow(dead_code)]
 pub fn add_terminal_tab_to_notebook(
     pane_widget: &gtk::Widget,
     callbacks: &Rc<PaneCallbacks>,
@@ -466,6 +469,7 @@ pub fn add_terminal_tab_to_notebook(
     }
 }
 
+#[allow(dead_code)]
 pub fn add_browser_tab_to_pane(pane_widget: &gtk::Widget, callbacks: &Rc<PaneCallbacks>) {
     if let Some((header, content_stack, tab_state, pane_outer)) = find_pane_internals(pane_widget) {
         if let Some(tab_strip) = find_tab_strip(&header) {
@@ -480,6 +484,7 @@ pub fn add_browser_tab_to_pane(pane_widget: &gtk::Widget, callbacks: &Rc<PaneCal
     }
 }
 
+#[allow(dead_code)]
 fn find_pane_internals(
     _pane_widget: &gtk::Widget,
 ) -> Option<(
@@ -494,6 +499,7 @@ fn find_pane_internals(
     None
 }
 
+#[allow(dead_code)]
 fn find_tab_strip(header: &gtk::Box) -> Option<gtk::Box> {
     let mut child = header.first_child();
     while let Some(c) = child {
@@ -723,7 +729,7 @@ fn show_tab_context_menu(
 
     // Clean up popover when it closes
     {
-        let tb = tab_btn.clone();
+        let _tb = tab_btn.clone();
         menu.connect_closed(move |popover| {
             popover.unparent();
         });
@@ -847,7 +853,7 @@ fn reorder_tab(
 // ---------------------------------------------------------------------------
 
 fn activate_tab(
-    tab_strip: &gtk::Box,
+    _tab_strip: &gtk::Box,
     content_stack: &gtk::Stack,
     tab_state: &Rc<std::cell::RefCell<TabState>>,
     tab_id: &str,

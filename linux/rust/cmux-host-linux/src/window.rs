@@ -3,7 +3,6 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::glib;
-use gtk::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
 
@@ -85,6 +84,7 @@ struct Workspace {
     /// The folder path this workspace was opened with.
     folder_path: Option<String>,
     /// Path label shown below workspace name in sidebar.
+    #[allow(dead_code)]
     path_label: gtk::Label,
 }
 
@@ -1111,7 +1111,7 @@ fn install_workspace_row_interactions(
         let state = state.clone();
         let target_workspace_id = workspace_id.to_string();
         let r = row.clone();
-        drop_target.connect_drop(move |dt, value, _, y| {
+        drop_target.connect_drop(move |_dt, value, _, y| {
             r.remove_css_class("cmux-drop-above");
             r.remove_css_class("cmux-drop-below");
             let drop_below = y >= r.height() as f64 / 2.0;
@@ -1676,31 +1676,6 @@ fn find_leaf_pane(widget: &gtk::Widget, axis: gtk::Orientation, prefer_start: bo
     }
 }
 
-fn make_pane_callbacks(state: &State, ws_id: &str) -> Rc<PaneCallbacks> {
-    let s1 = state.clone();
-    let s2 = state.clone();
-    let s3 = state.clone();
-    let s4 = state.clone();
-    let s5 = state.clone();
-    let id1 = ws_id.to_string();
-    let id2 = ws_id.to_string();
-    let id3 = ws_id.to_string();
-    let id4 = ws_id.to_string();
-    let id5 = ws_id.to_string();
-
-    Rc::new(PaneCallbacks {
-        on_split: Box::new(move |pw, o| split_pane(&s1, &id1, pw, o)),
-        on_close_pane: Box::new(move |pw| remove_pane(&s2, &id2, pw)),
-        on_bell: Box::new(move || mark_workspace_unread(&s3, &id3)),
-        on_pwd_changed: Box::new(move |pwd: &str| {
-            let s = s4.borrow();
-            if let Some(ws) = s.workspaces.iter().find(|w| w.id == id4) {
-                *ws.cwd.borrow_mut() = Some(pwd.to_string());
-            }
-        }),
-        on_empty: Box::new(move |pw| remove_pane(&s5, &id5, pw)),
-    })
-}
 
 fn mark_workspace_unread(state: &State, ws_id: &str) {
     let mut s = state.borrow_mut();
