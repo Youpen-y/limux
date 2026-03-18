@@ -282,6 +282,7 @@ pub struct ghostty_action_s {
 #[repr(C)]
 pub union ghostty_action_u {
     pub set_title: ghostty_action_set_title_s,
+    pub pwd: ghostty_action_pwd_s,
     pub child_exited: ghostty_surface_message_childexited_s,
     _padding: [u8; 24],
 }
@@ -290,6 +291,12 @@ pub union ghostty_action_u {
 #[derive(Clone, Copy)]
 pub struct ghostty_action_set_title_s {
     pub title: *const c_char,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ghostty_action_pwd_s {
+    pub pwd: *const c_char,
 }
 
 #[repr(C)]

@@ -31,6 +31,7 @@ struct SurfaceEntry {
     gl_area: gtk::GLArea,
     toast_overlay: gtk::Overlay,
     on_title_changed: Option<Box<dyn Fn(&str)>>,
+    on_pwd_changed: Option<Box<dyn Fn(&str)>>,
     on_bell: Option<Box<dyn Fn()>>,
     on_close: Option<Box<dyn Fn()>>,
 }
@@ -128,6 +129,26 @@ unsafe extern "C" fn ghostty_action_cb(
                         if let Some(entry) = map.borrow().get(&surface_key) {
                             if let Some(cb) = &entry.on_title_changed {
                                 cb(&title);
+                            }
+                        }
+                    });
+                }
+            }
+            true
+        }
+        GHOSTTY_ACTION_PWD => {
+            if target.tag == GHOSTTY_TARGET_SURFACE {
+                let surface_key = unsafe { target.target.surface } as usize;
+                let pwd_ptr = unsafe { action.action.pwd.pwd };
+                if !pwd_ptr.is_null() {
+                    let pwd = unsafe { std::ffi::CStr::from_ptr(pwd_ptr) }
+                        .to_str()
+                        .unwrap_or("")
+                        .to_string();
+                    SURFACE_MAP.with(|map| {
+                        if let Some(entry) = map.borrow().get(&surface_key) {
+                            if let Some(cb) = &entry.on_pwd_changed {
+                                cb(&pwd);
                             }
                         }
                     });
@@ -310,6 +331,7 @@ unsafe extern "C" fn ghostty_close_surface_cb(userdata: *mut c_void, _process_al
 
 pub struct TerminalCallbacks {
     pub on_title_changed: Box<dyn Fn(&str)>,
+    pub on_pwd_changed: Box<dyn Fn(&str)>,
     pub on_bell: Box<dyn Fn()>,
     pub on_close: Box<dyn Fn()>,
 }
@@ -410,6 +432,10 @@ pub fn create_terminal(
                         on_title_changed: Some(Box::new({
                             let cb = callbacks.clone();
                             move |title| (cb.on_title_changed)(title)
+                        })),
+                        on_pwd_changed: Some(Box::new({
+                            let cb = callbacks.clone();
+                            move |pwd| (cb.on_pwd_changed)(pwd)
                         })),
                         on_bell: Some(Box::new({
                             let cb = callbacks.clone();

@@ -20,6 +20,7 @@ pub struct PaneCallbacks {
     pub on_split: Box<dyn Fn(&gtk::Widget, gtk::Orientation)>,
     pub on_close_pane: Box<dyn Fn(&gtk::Widget)>,
     pub on_bell: Box<dyn Fn()>,
+    pub on_pwd_changed: Box<dyn Fn(&str)>,
     pub on_empty: Box<dyn Fn(&gtk::Widget)>,
 }
 
@@ -366,6 +367,12 @@ fn add_terminal_tab_inner(
             }),
             on_bell: Box::new(move || {
                 (cb_bell.on_bell)();
+            }),
+            on_pwd_changed: Box::new({
+                let cb_pwd = callbacks.clone();
+                move |pwd: &str| {
+                    (cb_pwd.on_pwd_changed)(pwd);
+                }
             }),
             on_close: Box::new(move || {
                 let ts = ts.clone();

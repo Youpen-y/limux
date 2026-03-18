@@ -10,6 +10,51 @@ use libadwaita as adw;
 use crate::pane::{self, PaneCallbacks};
 
 // ---------------------------------------------------------------------------
+// Workspace persistence
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct SavedWorkspace {
+    name: String,
+    favorite: bool,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+fn persistence_path() -> std::path::PathBuf {
+    let dir = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("~/.local/share"))
+        .join("limux");
+    std::fs::create_dir_all(&dir).ok();
+    dir.join("workspaces.json")
+}
+
+fn load_workspaces() -> Vec<SavedWorkspace> {
+    let path = persistence_path();
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_workspaces(state: &State) {
+    let s = state.borrow();
+    let saved: Vec<SavedWorkspace> = s
+        .workspaces
+        .iter()
+        .map(|ws| SavedWorkspace {
+            name: ws.name.clone(),
+            favorite: ws.favorite,
+            cwd: ws.cwd.borrow().clone(),
+        })
+        .collect();
+    if let Ok(json) = serde_json::to_string_pretty(&saved) {
+        let path = persistence_path();
+        std::fs::write(&path, json).ok();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
@@ -32,6 +77,8 @@ struct Workspace {
     unread: bool,
     /// Whether this workspace is favorited/pinned to top.
     favorite: bool,
+    /// Last known working directory from the terminal (via OSC 7).
+    cwd: Rc<RefCell<Option<String>>>,
 }
 
 struct AppState {
@@ -115,6 +162,8 @@ row:selected .cmux-ws-star-btn {
     background-color: rgba(0, 145, 255, 0.18);
     border-left: 3px solid #0091FF;
     border-radius: 6px;
+    margin-left: 0;
+    margin-right: 0;
 }
 .cmux-sidebar-row-unread .cmux-ws-name {
     color: white;
@@ -149,6 +198,23 @@ row:selected .cmux-ws-star-btn {
 .cmux-sidebar-btn:hover {
     background: rgba(255, 255, 255, 0.14);
     color: white;
+}
+.cmux-trash-btn {
+    background: rgba(255, 255, 255, 0.08);
+    color: rgba(255, 255, 255, 0.5);
+    border: none;
+    border-radius: 6px;
+    padding: 6px;
+    min-height: 0;
+    min-width: 0;
+}
+.cmux-trash-btn:hover {
+    background: rgba(255, 80, 80, 0.25);
+    color: rgba(255, 80, 80, 0.9);
+}
+.cmux-trash-btn-active {
+    background: rgba(255, 80, 80, 0.35);
+    color: rgba(255, 80, 80, 1);
 }
 .cmux-content {
     background-color: rgba(23, 23, 23, 1);
@@ -231,8 +297,45 @@ pub fn build_window(app: &adw::Application) {
         .build();
     sidebar_title.add_css_class("cmux-sidebar-title");
 
-    let new_ws_btn = gtk::Button::builder().label("New Workspace").build();
+    let new_ws_btn = gtk::Button::builder()
+        .label("New Workspace")
+        .hexpand(true)
+        .build();
     new_ws_btn.add_css_class("cmux-sidebar-btn");
+
+    let trash_btn = gtk::Button::builder()
+        .icon_name("user-trash-symbolic")
+        .tooltip_text("Drop workspace here to delete")
+        .build();
+    trash_btn.add_css_class("cmux-trash-btn");
+
+    // Trash visual feedback (drop handler wired after state is created)
+    let trash_drop = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::MOVE);
+    trash_drop.set_preload(true);
+    {
+        let tb = trash_btn.clone();
+        trash_drop.connect_motion(move |_, _, _| {
+            tb.add_css_class("cmux-trash-btn-active");
+            gtk::gdk::DragAction::MOVE
+        });
+    }
+    {
+        let tb = trash_btn.clone();
+        trash_drop.connect_leave(move |_| {
+            tb.remove_css_class("cmux-trash-btn-active");
+        });
+    }
+    trash_btn.add_controller(trash_drop.clone());
+
+    let bottom_bar = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(4)
+        .margin_start(6)
+        .margin_end(6)
+        .margin_bottom(6)
+        .build();
+    bottom_bar.append(&new_ws_btn);
+    bottom_bar.append(&trash_btn);
 
     let sidebar = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -242,7 +345,7 @@ pub fn build_window(app: &adw::Application) {
     sidebar.add_css_class("cmux-sidebar");
     sidebar.append(&sidebar_title);
     sidebar.append(&sidebar_scroll);
-    sidebar.append(&new_ws_btn);
+    sidebar.append(&bottom_bar);
 
     let main_paned = gtk::Paned::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -298,7 +401,39 @@ pub fn build_window(app: &adw::Application) {
         });
     }
 
-    add_workspace(&state, None);
+    // Wire up trash drop handler (needs state)
+    {
+        let state = state.clone();
+        let tb = trash_btn.clone();
+        trash_drop.connect_drop(move |_, value, _, _| {
+            tb.remove_css_class("cmux-trash-btn-active");
+            if let Ok(workspace_id) = value.get::<String>() {
+                close_workspace_by_id(&state, &workspace_id);
+                save_workspaces(&state);
+                return true;
+            }
+            false
+        });
+    }
+
+    // Save workspaces (including latest CWD) on window close
+    {
+        let state = state.clone();
+        window.connect_close_request(move |_| {
+            save_workspaces(&state);
+            glib::Propagation::Proceed
+        });
+    }
+
+    // Restore saved workspaces, or create a default one
+    let saved = load_workspaces();
+    if saved.is_empty() {
+        add_workspace(&state, None);
+    } else {
+        for sw in &saved {
+            add_workspace_with_name(&state, &sw.name, sw.favorite, sw.cwd.as_deref());
+        }
+    }
     window.present();
 }
 
@@ -529,6 +664,55 @@ fn favorites_prefix_len(flags: &[bool]) -> usize {
     flags.iter().take_while(|is_favorite| **is_favorite).count()
 }
 
+fn show_workspace_context_menu(state: &State, workspace_id: &str, row: &gtk::ListBoxRow) {
+    let menu_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    menu_box.set_margin_top(4);
+    menu_box.set_margin_bottom(4);
+    menu_box.set_margin_start(4);
+    menu_box.set_margin_end(4);
+
+    let rename_btn = gtk::Button::with_label("Rename");
+    rename_btn.add_css_class("flat");
+    let delete_btn = gtk::Button::with_label("Delete");
+    delete_btn.add_css_class("flat");
+    delete_btn.add_css_class("destructive-action");
+
+    menu_box.append(&rename_btn);
+    menu_box.append(&delete_btn);
+
+    let popover = gtk::Popover::new();
+    popover.set_child(Some(&menu_box));
+    popover.set_parent(row);
+    popover.set_position(gtk::PositionType::Right);
+
+    {
+        let state = state.clone();
+        let ws_id = workspace_id.to_string();
+        let pop = popover.clone();
+        rename_btn.connect_clicked(move |_| {
+            pop.popdown();
+            begin_workspace_inline_rename(&state, &ws_id);
+        });
+    }
+    {
+        let state = state.clone();
+        let ws_id = workspace_id.to_string();
+        let pop = popover.clone();
+        delete_btn.connect_clicked(move |_| {
+            pop.popdown();
+            close_workspace_by_id(&state, &ws_id);
+            save_workspaces(&state);
+        });
+    }
+    {
+        popover.connect_closed(move |p| {
+            p.unparent();
+        });
+    }
+
+    popover.popup();
+}
+
 fn clamp_workspace_insert_index_for_pinning(
     favorite_flags_after_removal: &[bool],
     moving_is_favorite: bool,
@@ -656,6 +840,8 @@ fn begin_workspace_inline_rename(state: &State, workspace_id: &str) {
                 {
                     workspace.name = next_name;
                 }
+                drop(s);
+                save_workspaces(&state_for_commit);
             }
 
             label_for_commit.set_visible(true);
@@ -755,6 +941,7 @@ fn reorder_workspace_by_id(state: &State, source_id: &str, target_id: &str, drop
     if let Some(row) = row_to_select {
         sidebar_list.select_row(Some(&row));
     }
+    save_workspaces(state);
 
     true
 }
@@ -804,6 +991,7 @@ fn toggle_workspace_favorite(state: &State, workspace_id: &str) {
     if let Some(row) = row_to_select {
         sidebar_list.select_row(Some(&row));
     }
+    save_workspaces(state);
 }
 
 fn install_workspace_row_interactions(
@@ -812,14 +1000,15 @@ fn install_workspace_row_interactions(
     row: &gtk::ListBoxRow,
     favorite_button: &gtk::Button,
 ) {
-    // Right click starts inline rename.
+    // Right click shows context menu with Rename / Delete.
     let right_click = gtk::GestureClick::new();
     right_click.set_button(3);
     {
         let state = state.clone();
         let workspace_id = workspace_id.to_string();
+        let r = row.clone();
         right_click.connect_pressed(move |_, _, _, _| {
-            begin_workspace_inline_rename(&state, &workspace_id);
+            show_workspace_context_menu(&state, &workspace_id, &r);
         });
     }
     row.add_controller(right_click);
@@ -923,6 +1112,7 @@ fn add_workspace(state: &State, working_directory: Option<&str>) {
     s.sidebar_list.append(&row);
     install_workspace_row_interactions(state, &id, &row, &favorite_button);
 
+    let cwd: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let ws = Workspace {
         id,
         name,
@@ -934,7 +1124,53 @@ fn add_workspace(state: &State, working_directory: Option<&str>) {
         notify_label,
         unread: false,
         favorite: false,
+        cwd,
     };
+
+    s.workspaces.push(ws);
+    let new_idx = s.workspaces.len() - 1;
+    s.active_idx = new_idx;
+    s.stack.set_visible_child_name(&stack_name);
+
+    let sidebar_list = s.sidebar_list.clone();
+    drop(s);
+
+    sidebar_list.select_row(Some(&row));
+    save_workspaces(state);
+}
+
+fn add_workspace_with_name(state: &State, name: &str, favorite: bool, saved_cwd: Option<&str>) {
+    let mut s = state.borrow_mut();
+    let id = uuid::Uuid::new_v4().to_string();
+    let stack_name = format!("ws-{id}");
+
+    let pane_widget = create_pane_for_workspace(state, &id, saved_cwd);
+    let root: gtk::Widget = pane_widget.upcast();
+
+    s.stack.add_named(&root, Some(&stack_name));
+
+    let (row, name_label, favorite_button, notify_dot, notify_label) = build_sidebar_row(name);
+    s.sidebar_list.append(&row);
+    install_workspace_row_interactions(state, &id, &row, &favorite_button);
+
+    let cwd: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(saved_cwd.map(|s| s.to_string())));
+    let ws = Workspace {
+        id,
+        name: name.to_string(),
+        root,
+        sidebar_row: row.clone(),
+        name_label,
+        favorite_button,
+        notify_dot,
+        notify_label,
+        unread: false,
+        favorite,
+        cwd,
+    };
+
+    if favorite {
+        set_workspace_favorite_visual(&ws);
+    }
 
     s.workspaces.push(ws);
     let new_idx = s.workspaces.len() - 1;
@@ -956,10 +1192,12 @@ fn create_pane_for_workspace(
     let state_for_split = state.clone();
     let state_for_close = state.clone();
     let state_for_bell = state.clone();
+    let state_for_pwd = state.clone();
     let state_for_empty = state.clone();
     let ws_id_split = ws_id.to_string();
     let ws_id_close = ws_id.to_string();
     let ws_id_bell = ws_id.to_string();
+    let ws_id_pwd = ws_id.to_string();
     let ws_id_empty = ws_id.to_string();
 
     let callbacks = Rc::new(PaneCallbacks {
@@ -975,6 +1213,17 @@ fn create_pane_for_workspace(
             let ws_id = ws_id_bell.clone();
             glib::idle_add_local_once(move || {
                 mark_workspace_unread(&state, &ws_id);
+            });
+        }),
+        on_pwd_changed: Box::new(move |pwd: &str| {
+            let state = state_for_pwd.clone();
+            let ws_id = ws_id_pwd.clone();
+            let pwd = pwd.to_string();
+            glib::idle_add_local_once(move || {
+                let s = state.borrow();
+                if let Some(ws) = s.workspaces.iter().find(|w| w.id == ws_id) {
+                    *ws.cwd.borrow_mut() = Some(pwd);
+                }
             });
         }),
         on_empty: Box::new(move |pane_widget| {
@@ -1026,6 +1275,7 @@ fn close_workspace_by_id(state: &State, id: &str) {
     drop(s);
 
     sidebar_list.select_row(Some(&row));
+    save_workspaces(state);
 }
 
 fn switch_workspace(state: &State, idx: usize) {
@@ -1045,6 +1295,7 @@ fn switch_workspace(state: &State, idx: usize) {
         ws.notify_dot.add_css_class("cmux-notify-dot-hidden");
         ws.notify_label.remove_css_class("cmux-notify-msg-unread");
         ws.notify_label.add_css_class("cmux-notify-msg");
+        ws.notify_label.set_visible(false);
         // Remove glow pulse from sidebar row
         if let Some(row_box) = ws.sidebar_row.child() {
             row_box.remove_css_class("cmux-sidebar-row-unread");
@@ -1330,16 +1581,24 @@ fn make_pane_callbacks(state: &State, ws_id: &str) -> Rc<PaneCallbacks> {
     let s2 = state.clone();
     let s3 = state.clone();
     let s4 = state.clone();
+    let s5 = state.clone();
     let id1 = ws_id.to_string();
     let id2 = ws_id.to_string();
     let id3 = ws_id.to_string();
     let id4 = ws_id.to_string();
+    let id5 = ws_id.to_string();
 
     Rc::new(PaneCallbacks {
         on_split: Box::new(move |pw, o| split_pane(&s1, &id1, pw, o)),
         on_close_pane: Box::new(move |pw| remove_pane(&s2, &id2, pw)),
         on_bell: Box::new(move || mark_workspace_unread(&s3, &id3)),
-        on_empty: Box::new(move |pw| remove_pane(&s4, &id4, pw)),
+        on_pwd_changed: Box::new(move |pwd: &str| {
+            let s = s4.borrow();
+            if let Some(ws) = s.workspaces.iter().find(|w| w.id == id4) {
+                *ws.cwd.borrow_mut() = Some(pwd.to_string());
+            }
+        }),
+        on_empty: Box::new(move |pw| remove_pane(&s5, &id5, pw)),
     })
 }
 
