@@ -1538,12 +1538,65 @@ fn cycle_workspace(state: &State, direction: i32) {
     sidebar_list.select_row(Some(&row));
 }
 
+/// Default sidebar width in pixels.
+const SIDEBAR_WIDTH: i32 = 220;
+
 fn toggle_sidebar(state: &State) {
     let s = state.borrow();
-    if let Some(sidebar) = s.paned.start_child() {
-        let will_hide = sidebar.is_visible();
-        sidebar.set_visible(!will_hide);
-        s.expand_btn.set_visible(will_hide);
+    let paned = s.paned.clone();
+    let expand_btn = s.expand_btn.clone();
+    let sidebar = match s.paned.start_child() {
+        Some(sb) => sb,
+        None => return,
+    };
+    drop(s);
+
+    let current = paned.position();
+    let is_visible = current > 10; // treat < 10px as collapsed
+
+    if is_visible {
+        // Collapse: animate position to 0, then hide sidebar, show expand button
+        expand_btn.set_visible(true);
+        let target = adw::CallbackAnimationTarget::new({
+            let p = paned.clone();
+            move |value| {
+                p.set_position(value as i32);
+            }
+        });
+        let animation = adw::TimedAnimation::builder()
+            .widget(&paned)
+            .value_from(current as f64)
+            .value_to(0.0)
+            .duration(200)
+            .easing(adw::Easing::EaseInOutCubic)
+            .target(&target)
+            .build();
+        animation.connect_done(move |_| {
+            sidebar.set_visible(false);
+        });
+        animation.play();
+    } else {
+        // Expand: make sidebar visible, then animate position from 0 to SIDEBAR_WIDTH
+        sidebar.set_visible(true);
+        paned.set_position(0);
+        let target = adw::CallbackAnimationTarget::new({
+            let p = paned.clone();
+            move |value| {
+                p.set_position(value as i32);
+            }
+        });
+        let animation = adw::TimedAnimation::builder()
+            .widget(&paned)
+            .value_from(0.0)
+            .value_to(SIDEBAR_WIDTH as f64)
+            .duration(200)
+            .easing(adw::Easing::EaseInOutCubic)
+            .target(&target)
+            .build();
+        animation.connect_done(move |_| {
+            expand_btn.set_visible(false);
+        });
+        animation.play();
     }
 }
 
