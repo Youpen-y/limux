@@ -1696,8 +1696,10 @@ fn focus_pane_in_direction(state: &State, direction: Direction) {
                         // "Nearest" means the edge closest to where we came from.
                         let prefer_start = !must_be_start;
                         let leaf = find_leaf_pane(&sibling, target_orientation, prefer_start);
-                        // The leaf is a pane Box — use child_focus to reach the GLArea inside
-                        leaf.child_focus(gtk::DirectionType::TabForward);
+                        // Find the GLArea inside the pane and focus it directly
+                        if let Some(gl) = find_gl_area(&leaf) {
+                            gl.grab_focus();
+                        }
                     }
                     return;
                 }
@@ -1705,6 +1707,21 @@ fn focus_pane_in_direction(state: &State, direction: Direction) {
         }
         current = parent;
     }
+}
+
+/// Recursively find the first GLArea inside a widget tree.
+fn find_gl_area(widget: &gtk::Widget) -> Option<gtk::GLArea> {
+    if let Some(gl) = widget.downcast_ref::<gtk::GLArea>() {
+        return Some(gl.clone());
+    }
+    let mut child = widget.first_child();
+    while let Some(c) = child {
+        if let Some(gl) = find_gl_area(&c) {
+            return Some(gl);
+        }
+        child = c.next_sibling();
+    }
+    None
 }
 
 /// Descend a pane/split subtree to find a leaf pane widget.
