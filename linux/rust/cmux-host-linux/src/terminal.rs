@@ -188,10 +188,20 @@ unsafe extern "C" fn ghostty_action_cb(
     }
 }
 
-/// Find the first surface pointer from the surface map.
+/// Find the surface whose GLArea currently has focus, or fall back to any surface.
 /// Used by clipboard callbacks that receive null userdata.
-fn find_any_surface() -> Option<ghostty_surface_t> {
-    SURFACE_MAP.with(|map| map.borrow().keys().next().map(|&k| k as ghostty_surface_t))
+fn find_focused_surface() -> Option<ghostty_surface_t> {
+    SURFACE_MAP.with(|map| {
+        let m = map.borrow();
+        // Prefer the surface whose GLArea has focus
+        for (&key, entry) in m.iter() {
+            if entry.gl_area.has_focus() || entry.gl_area.is_focus() {
+                return Some(key as ghostty_surface_t);
+            }
+        }
+        // Fall back to any surface
+        m.keys().next().map(|&k| k as ghostty_surface_t)
+    })
 }
 
 unsafe extern "C" fn ghostty_read_clipboard_cb(
@@ -200,11 +210,11 @@ unsafe extern "C" fn ghostty_read_clipboard_cb(
     state: *mut c_void,
 ) {
     // userdata may be null if surface config userdata wasn't set.
-    // Fall back to finding the surface from our map.
+    // Fall back to finding the focused surface from our map.
     let surface_ptr = if !userdata.is_null() {
         userdata as ghostty_surface_t
     } else {
-        match find_any_surface() {
+        match find_focused_surface() {
             Some(s) => s,
             None => return,
         }
@@ -246,7 +256,7 @@ unsafe extern "C" fn ghostty_confirm_read_clipboard_cb(
     let surface_ptr = if !userdata.is_null() {
         userdata as ghostty_surface_t
     } else {
-        match find_any_surface() {
+        match find_focused_surface() {
             Some(s) => s,
             None => return,
         }
@@ -300,7 +310,7 @@ unsafe extern "C" fn ghostty_write_clipboard_cb(
     let surface_key = if !userdata.is_null() {
         userdata as usize
     } else {
-        match find_any_surface() {
+        match find_focused_surface() {
             Some(s) => s as usize,
             None => return,
         }
