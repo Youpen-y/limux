@@ -1606,7 +1606,7 @@ fn split_pane(
     new_paned.set_start_child(Some(pane_widget));
     new_paned.set_end_child(Some(&new_pane));
 
-    // 50% split after layout
+    // Animate from full size (new pane hidden) to 50% split
     {
         let np = new_paned.clone();
         glib::idle_add_local_once(move || {
@@ -1617,10 +1617,32 @@ fn split_pane(
                 alloc.height()
             };
             if size > 0 {
-                np.set_position(size / 2);
+                let target = size / 2;
+                // Start with the divider pushed all the way — new pane invisible
+                np.set_position(size);
+                animate_paned_position(&np, size as f64, target as f64, 200);
             }
         });
     }
+}
+
+/// Animate a Paned's position from `from` to `to` over `duration_ms` using adw::TimedAnimation.
+fn animate_paned_position(paned: &gtk::Paned, from: f64, to: f64, duration_ms: u32) {
+    let target = adw::CallbackAnimationTarget::new({
+        let p = paned.clone();
+        move |value| {
+            p.set_position(value as i32);
+        }
+    });
+    let animation = adw::TimedAnimation::builder()
+        .widget(paned)
+        .value_from(from)
+        .value_to(to)
+        .duration(duration_ms)
+        .easing(adw::Easing::EaseOutCubic)
+        .target(&target)
+        .build();
+    animation.play();
 }
 
 fn remove_pane(state: &State, ws_id: &str, pane_widget: &gtk::Widget) {
@@ -1631,62 +1653,107 @@ fn remove_pane(state: &State, ws_id: &str, pane_widget: &gtk::Widget) {
     };
 
     if let Some(paned) = parent.downcast_ref::<gtk::Paned>() {
-        // Find sibling
-        let sibling = if paned
+        let is_start_child = paned
             .start_child()
             .map(|c| c == *pane_widget)
-            .unwrap_or(false)
-        {
+            .unwrap_or(false);
+        let sibling = if is_start_child {
             paned.end_child()
         } else {
             paned.start_child()
         };
 
-        if let Some(sibling) = sibling {
-            // Move focus to the sibling's GLArea before detaching to avoid
-            // GTK focus tracking warnings on ancestor Paneds.
-            if let Some(gl) = find_gl_area(&sibling) {
-                gl.grab_focus();
-            }
+        let Some(sibling) = sibling else {
+            return;
+        };
 
-            // Walk up and clear focus_child on all ancestor Paneds
-            let mut ancestor = paned.parent();
-            while let Some(a) = ancestor {
-                if let Some(ap) = a.downcast_ref::<gtk::Paned>() {
-                    ap.set_focus_child(gtk::Widget::NONE);
-                }
-                ancestor = a.parent();
-            }
-            paned.set_focus_child(gtk::Widget::NONE);
-            paned.set_start_child(gtk::Widget::NONE);
-            paned.set_end_child(gtk::Widget::NONE);
-
-            if let Some(grandparent) = paned.parent() {
-                if let Some(gp_paned) = grandparent.downcast_ref::<gtk::Paned>() {
-                    let is_start = gp_paned
-                        .start_child()
-                        .map(|c| c == paned.clone().upcast::<gtk::Widget>())
-                        .unwrap_or(false);
-                    if is_start {
-                        gp_paned.set_start_child(Some(&sibling));
-                    } else {
-                        gp_paned.set_end_child(Some(&sibling));
-                    }
-                } else if let Some(stack) = grandparent.downcast_ref::<gtk::Stack>() {
-                    let page_name = format!("ws-{ws_id}");
-                    stack.remove(paned);
-                    stack.add_named(&sibling, Some(&page_name));
-                    stack.set_visible_child_name(&page_name);
-                    let mut s = state.borrow_mut();
-                    if let Some(ws) = s.workspaces.iter_mut().find(|w| w.id == ws_id) {
-                        ws.root = sibling.clone();
-                    }
-                }
-            }
+        // Move focus to the sibling's GLArea before animating
+        if let Some(gl) = find_gl_area(&sibling) {
+            gl.grab_focus();
         }
+
+        // Animate the paned position to collapse the closing pane
+        let current_pos = paned.position() as f64;
+        let alloc = paned.allocation();
+        let total = if paned.orientation() == gtk::Orientation::Horizontal {
+            alloc.width()
+        } else {
+            alloc.height()
+        } as f64;
+
+        // If removing start child, animate position to 0; if end child, to total
+        let target_pos = if is_start_child { 0.0 } else { total };
+
+        let paned_clone = paned.clone();
+        let sibling_clone = sibling.clone();
+        let state_clone = state.clone();
+        let ws_id = ws_id.to_string();
+
+        let target = adw::CallbackAnimationTarget::new({
+            let p = paned.clone();
+            move |value| {
+                p.set_position(value as i32);
+            }
+        });
+        let animation = adw::TimedAnimation::builder()
+            .widget(paned)
+            .value_from(current_pos)
+            .value_to(target_pos)
+            .duration(150)
+            .easing(adw::Easing::EaseInCubic)
+            .target(&target)
+            .build();
+
+        animation.connect_done(move |_| {
+            finish_remove_pane(&state_clone, &ws_id, &paned_clone, &sibling_clone);
+        });
+        animation.play();
     } else if parent.downcast_ref::<gtk::Stack>().is_some() {
         // This is the only pane in the workspace — close the workspace
         close_workspace_by_id(state, ws_id);
+    }
+}
+
+/// Complete pane removal after the collapse animation finishes.
+fn finish_remove_pane(
+    state: &State,
+    ws_id: &str,
+    paned: &gtk::Paned,
+    sibling: &gtk::Widget,
+) {
+    // Walk up and clear focus_child on all ancestor Paneds
+    let mut ancestor = paned.parent();
+    while let Some(a) = ancestor {
+        if let Some(ap) = a.downcast_ref::<gtk::Paned>() {
+            ap.set_focus_child(gtk::Widget::NONE);
+        }
+        ancestor = a.parent();
+    }
+    paned.set_focus_child(gtk::Widget::NONE);
+    paned.set_start_child(gtk::Widget::NONE);
+    paned.set_end_child(gtk::Widget::NONE);
+
+    if let Some(grandparent) = paned.parent() {
+        if let Some(gp_paned) = grandparent.downcast_ref::<gtk::Paned>() {
+            let is_start = gp_paned
+                .start_child()
+                .map(|c| c == paned.clone().upcast::<gtk::Widget>())
+                .unwrap_or(false);
+            if is_start {
+                gp_paned.set_start_child(Some(sibling));
+            } else {
+                gp_paned.set_end_child(Some(sibling));
+            }
+        } else if let Some(stack) = grandparent.downcast_ref::<gtk::Stack>() {
+            let page_name = format!("ws-{ws_id}");
+            stack.remove(paned);
+            stack.add_named(sibling, Some(&page_name));
+            stack.set_visible_child_name(&page_name);
+            let mut s = state.borrow_mut();
+            if let Some(ws) = s.workspaces.iter_mut().find(|w| w.id == ws_id) {
+                ws.root = sibling.clone();
+            }
+        }
     }
 }
 
