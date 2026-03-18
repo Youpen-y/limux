@@ -95,6 +95,7 @@ struct AppState {
     sidebar_list: gtk::ListBox,
     paned: gtk::Paned,
     new_ws_btn: gtk::Button,
+    expand_btn: gtk::Button,
 }
 
 impl AppState {
@@ -224,6 +225,31 @@ row:selected .cmux-ws-star-btn {
 row:selected .cmux-ws-path {
     color: rgba(255, 255, 255, 0.5);
 }
+.cmux-sidebar-collapse {
+    color: rgba(255, 255, 255, 0.4);
+    border: none;
+    min-height: 0;
+    min-width: 0;
+    padding: 0 6px;
+    font-size: 14px;
+}
+.cmux-sidebar-collapse:hover {
+    color: rgba(255, 255, 255, 0.9);
+}
+.cmux-sidebar-expand {
+    background-color: rgba(25, 25, 25, 1);
+    color: rgba(255, 255, 255, 0.5);
+    border: none;
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+    min-width: 0;
+    padding: 8px 4px;
+    font-size: 13px;
+}
+.cmux-sidebar-expand:hover {
+    background-color: rgba(40, 40, 40, 1);
+    color: white;
+}
 .cmux-content {
     background-color: rgba(23, 23, 23, 1);
 }
@@ -296,14 +322,27 @@ pub fn build_window(app: &adw::Application) {
         .child(&sidebar_list)
         .build();
 
-    let sidebar_title = gtk::Label::builder()
+    let sidebar_title_label = gtk::Label::builder()
         .label("WORKSPACES")
         .xalign(0.0)
+        .hexpand(true)
         .margin_start(12)
+        .build();
+    sidebar_title_label.add_css_class("cmux-sidebar-title");
+
+    let collapse_btn = gtk::Button::with_label("\u{00AB}"); // «
+    collapse_btn.add_css_class("flat");
+    collapse_btn.add_css_class("cmux-sidebar-collapse");
+    collapse_btn.set_tooltip_text(Some("Hide sidebar (Ctrl+B)"));
+
+    let sidebar_title = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
         .margin_top(8)
         .margin_bottom(4)
+        .margin_end(6)
         .build();
-    sidebar_title.add_css_class("cmux-sidebar-title");
+    sidebar_title.append(&sidebar_title_label);
+    sidebar_title.append(&collapse_btn);
 
     let new_ws_btn = gtk::Button::builder()
         .label("New Workspace")
@@ -351,9 +390,22 @@ pub fn build_window(app: &adw::Application) {
         .end_child(&stack)
         .build();
 
+    // Expand tab — small button on the left edge when sidebar is hidden
+    let expand_btn = gtk::Button::with_label("\u{00BB}"); // »
+    expand_btn.add_css_class("cmux-sidebar-expand");
+    expand_btn.set_tooltip_text(Some("Show sidebar (Ctrl+B)"));
+    expand_btn.set_valign(gtk::Align::Start);
+    expand_btn.set_halign(gtk::Align::Start);
+    expand_btn.set_margin_top(40);
+    expand_btn.set_visible(false);
+
+    let content_overlay = gtk::Overlay::new();
+    content_overlay.set_child(Some(&main_paned));
+    content_overlay.add_overlay(&expand_btn);
+
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
     vbox.append(&header);
-    vbox.append(&main_paned);
+    vbox.append(&content_overlay);
     window.set_content(Some(&vbox));
 
     let state: State = Rc::new(RefCell::new(AppState {
@@ -363,7 +415,24 @@ pub fn build_window(app: &adw::Application) {
         sidebar_list: sidebar_list.clone(),
         paned: main_paned.clone(),
         new_ws_btn: new_ws_btn.clone(),
+        expand_btn: expand_btn.clone(),
     }));
+
+    // Wire collapse button
+    {
+        let state = state.clone();
+        collapse_btn.connect_clicked(move |_| {
+            toggle_sidebar(&state);
+        });
+    }
+
+    // Wire expand button
+    {
+        let state = state.clone();
+        expand_btn.connect_clicked(move |_| {
+            toggle_sidebar(&state);
+        });
+    }
 
     register_actions(&window, &state);
     install_key_capture(&window, &state);
@@ -1473,7 +1542,9 @@ fn cycle_workspace(state: &State, direction: i32) {
 fn toggle_sidebar(state: &State) {
     let s = state.borrow();
     if let Some(sidebar) = s.paned.start_child() {
-        sidebar.set_visible(!sidebar.is_visible());
+        let will_hide = sidebar.is_visible();
+        sidebar.set_visible(!will_hide);
+        s.expand_btn.set_visible(will_hide);
     }
 }
 
