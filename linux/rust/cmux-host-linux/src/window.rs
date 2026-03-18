@@ -199,9 +199,9 @@ row:selected .cmux-ws-star-btn {
     color: rgba(255, 255, 255, 0.7);
     border: 1px solid transparent;
     border-radius: 6px;
-    padding: 2px 12px;
+    padding: 6px 12px;
     min-height: 0;
-    max-height: 20px;
+    max-height: 26px;
     transition: all 200ms ease;
 }
 .cmux-sidebar-btn:hover {
@@ -670,7 +670,14 @@ fn build_sidebar_row(
     let row = gtk::ListBoxRow::new();
     row.set_child(Some(&vbox));
 
-    (row, name_label, favorite_button, notify_dot, notify_label, path_label)
+    (
+        row,
+        name_label,
+        favorite_button,
+        notify_dot,
+        notify_label,
+        path_label,
+    )
 }
 
 /// Abbreviate a path by replacing the home directory with ~.
@@ -897,7 +904,12 @@ fn begin_workspace_inline_rename(state: &State, workspace_id: &str) {
     }
 }
 
-fn reorder_workspace_by_id(state: &State, source_id: &str, target_id: &str, drop_below: bool) -> bool {
+fn reorder_workspace_by_id(
+    state: &State,
+    source_id: &str,
+    target_id: &str,
+    drop_below: bool,
+) -> bool {
     let (sidebar_list, row_to_select) = {
         let mut s = state.borrow_mut();
         let Some(source_idx) = s
@@ -1065,7 +1077,8 @@ fn install_workspace_row_interactions(
             let s = state.borrow();
             s.new_ws_btn.set_label("New Workspace");
             s.new_ws_btn.remove_css_class("cmux-sidebar-btn-trash");
-            s.new_ws_btn.remove_css_class("cmux-sidebar-btn-trash-hover");
+            s.new_ws_btn
+                .remove_css_class("cmux-sidebar-btn-trash-hover");
         });
     }
     row.add_controller(drag_source);
