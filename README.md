@@ -17,23 +17,32 @@ https://github.com/user-attachments/assets/6f3047c2-e2b6-49f2-b536-570a1570d0f8
 
 ## Install
 
-Download the latest release tarball and run:
+Download the latest release from [GitHub Releases](https://github.com/am-will/limux/releases).
 
+**Debian/Ubuntu (.deb)** — recommended, shows up in app launcher immediately:
+```bash
+sudo apt install ./limux_0.1.0_amd64.deb
+```
+
+**AppImage** — portable, no install needed:
+```bash
+chmod +x Limux-0.1.0-x86_64.AppImage
+./Limux-0.1.0-x86_64.AppImage
+```
+
+**Tarball** — manual install:
 ```bash
 tar xzf limux-*-linux-x86_64.tar.gz
 cd limux-*-linux-x86_64
 sudo ./install.sh
 ```
 
-Then launch from your app menu or terminal:
-
-```bash
-limux
-```
-
 To uninstall:
-
 ```bash
+# deb
+sudo apt remove limux
+
+# tarball
 sudo ./install.sh --uninstall
 ```
 
