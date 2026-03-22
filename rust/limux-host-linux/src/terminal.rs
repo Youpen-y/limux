@@ -527,13 +527,45 @@ pub fn create_terminal(
     //
     // Send key events with the text field populated. Ghostty uses the
     // text field for actual character input and the keycode for bindings.
-    // Do NOT use ghostty_surface_text() for regular typing — Ghostty
-    // treats that as a paste, causing "pasting..." indicators in apps.
+    // For IME (Chinese/Japanese/Korean) input, we use GTK4's IMContext
+    // to handle composition and send the final text via ghostty_surface_text.
     {
         let sc_press = surface_cell.clone();
         let sc_release = surface_cell.clone();
+        let sc_commit = surface_cell.clone();
+        let ime_filtering = Rc::new(Cell::new(false));
+
         let key_controller = gtk::EventControllerKey::new();
+
+        // Create IMMulticontext for CJK input method support
+        let im_context = gtk::IMMulticontext::new();
+
+        // Track whether IME is filtering the key (during composition)
+        let ime_filtering_for_key = ime_filtering.clone();
+        key_controller.connect_im_update(move |_ctrl| {
+            ime_filtering_for_key.set(true);
+        });
+
+        // Send committed IME text (e.g., selected Chinese characters) to Ghostty
+        let sc_commit_clone = sc_commit.clone();
+        im_context.connect_commit(move |_im_context, text| {
+            if let Some(surface) = *sc_commit_clone.borrow() {
+                // Send the committed text directly to Ghostty
+                if let Ok(c_text) = CString::new(text) {
+                    unsafe {
+                        ghostty_surface_text(surface, c_text.as_ptr(), text.len());
+                    }
+                }
+            }
+        });
+
+        // Set the IMContext on the key controller
+        key_controller.set_im_context(Some(&im_context));
+
         key_controller.connect_key_pressed(move |_ctrl, keyval, keycode, modifier| {
+            // Reset the IME filtering flag for this key press
+            ime_filtering.set(false);
+
             if let Some(surface) = *sc_press.borrow() {
                 let text_char = keyval.to_unicode();
                 let mut text_buf = [0u8; 4];
@@ -546,6 +578,11 @@ pub fn create_terminal(
                     translate_key_event(GHOSTTY_ACTION_PRESS, keyval, keycode, modifier);
                 if let Some(ref ct) = c_text {
                     event.text = ct.as_ptr();
+                }
+
+                // Mark that we're in composition if IME is active
+                if ime_filtering.get() {
+                    event.composing = true;
                 }
 
                 let consumed = unsafe { ghostty_surface_key(surface, event) };
