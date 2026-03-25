@@ -2315,12 +2315,14 @@ fn create_pane_for_workspace(
     let state_for_split = state.clone();
     let state_for_close = state.clone();
     let state_for_bell = state.clone();
+    let state_for_desktop_notification = state.clone();
     let state_for_keybinds = state.clone();
     let state_for_pwd = state.clone();
     let state_for_empty = state.clone();
     let ws_id_split = ws_id.to_string();
     let ws_id_close = ws_id.to_string();
     let ws_id_bell = ws_id.to_string();
+    let ws_id_desktop_notification = ws_id.to_string();
     let ws_id_pwd = ws_id.to_string();
     let ws_id_empty = ws_id.to_string();
     let state_for_split_with_tab = state.clone();
@@ -2350,6 +2352,14 @@ fn create_pane_for_workspace(
             let ws_id = ws_id_bell.clone();
             glib::idle_add_local_once(move || {
                 mark_workspace_unread(&state, &ws_id);
+            });
+        }),
+        on_desktop_notification: Box::new(move |title: &str, body: &str| {
+            let state = state_for_desktop_notification.clone();
+            let ws_id = ws_id_desktop_notification.clone();
+            let message = workspace_notification_message(title, body);
+            glib::idle_add_local_once(move || {
+                mark_workspace_unread_with_message(&state, &ws_id, &message);
             });
         }),
         on_open_keybinds: Box::new(move |anchor| {
@@ -3171,6 +3181,21 @@ fn find_leaf_pane(widget: &gtk::Widget, axis: gtk::Orientation, prefer_start: bo
 }
 
 fn mark_workspace_unread(state: &State, ws_id: &str) {
+    mark_workspace_unread_with_message(state, ws_id, "Process needs attention");
+}
+
+fn workspace_notification_message(title: &str, body: &str) -> String {
+    let title = title.trim();
+    let body = body.trim();
+    match (title.is_empty(), body.is_empty()) {
+        (false, false) => format!("{title}: {body}"),
+        (false, true) => title.to_string(),
+        (true, false) => body.to_string(),
+        (true, true) => "Process needs attention".to_string(),
+    }
+}
+
+fn mark_workspace_unread_with_message(state: &State, ws_id: &str, message: &str) {
     let mut s = state.borrow_mut();
     let active_idx = s.active_idx;
     if let Some((idx, ws)) = s
@@ -3183,7 +3208,7 @@ fn mark_workspace_unread(state: &State, ws_id: &str) {
             ws.unread = true;
             ws.notify_dot.remove_css_class("limux-notify-dot-hidden");
             ws.notify_dot.add_css_class("limux-notify-dot");
-            ws.notify_label.set_label("Process needs attention");
+            ws.notify_label.set_label(message);
             ws.notify_label.remove_css_class("limux-notify-msg");
             ws.notify_label.add_css_class("limux-notify-msg-unread");
             ws.notify_label.set_visible(true);
@@ -3204,7 +3229,7 @@ mod tests {
         next_active_workspace_index, shortcut_allowed_while_browser_find_active,
         shortcut_blocked_by_editable, shortcut_command_from_key_event,
         shortcut_dispatch_propagation, tab_drag_workspace_seed, workspace_drop_layout_path,
-        EditableCaptureContext, WorkspaceSeedSource,
+        workspace_notification_message, EditableCaptureContext, WorkspaceSeedSource,
     };
     use crate::layout_state::{LayoutNodeState, PaneState, SplitOrientation, SplitState};
     use crate::shortcut_config::{
@@ -3234,6 +3259,23 @@ mod tests {
         let clamped =
             clamp_workspace_insert_index_for_pinning(&after_removal, true, after_removal.len());
         assert_eq!(clamped, 2);
+    }
+
+    #[test]
+    fn workspace_notification_message_prefers_title_and_body() {
+        assert_eq!(
+            workspace_notification_message("Codex", "Turn complete"),
+            "Codex: Turn complete"
+        );
+        assert_eq!(workspace_notification_message("Codex", ""), "Codex");
+        assert_eq!(
+            workspace_notification_message("", "Turn complete"),
+            "Turn complete"
+        );
+        assert_eq!(
+            workspace_notification_message("  ", "  "),
+            "Process needs attention"
+        );
     }
 
     #[test]

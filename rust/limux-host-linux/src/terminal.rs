@@ -31,6 +31,7 @@ static GHOSTTY: OnceLock<GhosttyState> = OnceLock::new();
 
 type TitleChangedCallback = dyn Fn(&str);
 type PwdChangedCallback = dyn Fn(&str);
+type DesktopNotificationCallback = dyn Fn(&str, &str);
 type VoidCallback = dyn Fn();
 type WidgetCallback = dyn Fn(&gtk::Widget);
 
@@ -40,6 +41,7 @@ struct SurfaceEntry {
     toast_overlay: gtk::Overlay,
     on_title_changed: Option<Box<TitleChangedCallback>>,
     on_pwd_changed: Option<Box<PwdChangedCallback>>,
+    on_desktop_notification: Option<Box<DesktopNotificationCallback>>,
     on_bell: Option<Box<VoidCallback>>,
     on_close: Option<Box<VoidCallback>>,
     clipboard_context: *mut ClipboardContext,
@@ -284,6 +286,37 @@ unsafe extern "C" fn ghostty_action_cb(
             }
             true
         }
+        GHOSTTY_ACTION_DESKTOP_NOTIFICATION => {
+            if target.tag == GHOSTTY_TARGET_SURFACE {
+                let surface_key = unsafe { target.target.surface } as usize;
+                let title_ptr = unsafe { action.action.desktop_notification.title };
+                let body_ptr = unsafe { action.action.desktop_notification.body };
+                let title = if title_ptr.is_null() {
+                    String::new()
+                } else {
+                    unsafe { std::ffi::CStr::from_ptr(title_ptr) }
+                        .to_str()
+                        .unwrap_or("")
+                        .to_string()
+                };
+                let body = if body_ptr.is_null() {
+                    String::new()
+                } else {
+                    unsafe { std::ffi::CStr::from_ptr(body_ptr) }
+                        .to_str()
+                        .unwrap_or("")
+                        .to_string()
+                };
+                SURFACE_MAP.with(|map| {
+                    if let Some(entry) = map.borrow().get(&surface_key) {
+                        if let Some(cb) = &entry.on_desktop_notification {
+                            cb(&title, &body);
+                        }
+                    }
+                });
+            }
+            true
+        }
         GHOSTTY_ACTION_PWD => {
             if target.tag == GHOSTTY_TARGET_SURFACE {
                 let surface_key = unsafe { target.target.surface } as usize;
@@ -477,6 +510,7 @@ unsafe extern "C" fn ghostty_close_surface_cb(userdata: *mut c_void, _process_al
 pub struct TerminalCallbacks {
     pub on_title_changed: Box<TitleChangedCallback>,
     pub on_pwd_changed: Box<PwdChangedCallback>,
+    pub on_desktop_notification: Box<DesktopNotificationCallback>,
     pub on_bell: Box<VoidCallback>,
     pub on_close: Box<VoidCallback>,
     pub on_split_right: Box<VoidCallback>,
@@ -640,6 +674,13 @@ pub fn create_terminal(
                             move |pwd| {
                                 let callbacks = cb.borrow();
                                 (callbacks.on_pwd_changed)(pwd);
+                            }
+                        })),
+                        on_desktop_notification: Some(Box::new({
+                            let cb = callbacks.clone();
+                            move |title, body| {
+                                let callbacks = cb.borrow();
+                                (callbacks.on_desktop_notification)(title, body);
                             }
                         })),
                         on_bell: Some(Box::new({

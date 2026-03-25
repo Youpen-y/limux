@@ -147,6 +147,7 @@ type PaneSplitCallback = dyn Fn(&gtk::Widget, gtk::Orientation);
 type PaneWidgetCallback = dyn Fn(&gtk::Widget);
 type PaneSignalCallback = dyn Fn();
 type PanePathCallback = dyn Fn(&str);
+type PaneDesktopNotificationCallback = dyn Fn(&str, &str);
 type PaneEmptyCallback = dyn Fn(&gtk::Widget, PaneEmptyReason);
 type PaneShortcutStateCallback = dyn Fn() -> Rc<ResolvedShortcutConfig>;
 type PaneShortcutCaptureCallback =
@@ -157,6 +158,7 @@ pub struct PaneCallbacks {
     pub on_split: Box<PaneSplitCallback>,
     pub on_close_pane: Box<PaneWidgetCallback>,
     pub on_bell: Box<PaneSignalCallback>,
+    pub on_desktop_notification: Box<PaneDesktopNotificationCallback>,
     pub on_open_keybinds: Box<PaneWidgetCallback>,
     pub current_shortcuts: Box<PaneShortcutStateCallback>,
     pub on_capture_shortcut: Rc<PaneShortcutCaptureCallback>,
@@ -828,6 +830,12 @@ fn make_terminal_callbacks(
             *term_cwd_for_pwd.borrow_mut() = Some(pwd.to_string());
             (callbacks_for_pwd.on_pwd_changed)(pwd);
             (callbacks_for_pwd.on_state_changed)();
+        }),
+        on_desktop_notification: Box::new({
+            let callbacks = internals.callbacks.clone();
+            move |title: &str, body: &str| {
+                (callbacks.on_desktop_notification)(title, body);
+            }
         }),
         on_bell: Box::new(move || {
             (callbacks_for_bell.on_bell)();
