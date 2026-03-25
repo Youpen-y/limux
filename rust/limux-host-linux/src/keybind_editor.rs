@@ -9,6 +9,13 @@ use crate::shortcut_config::{
     self, NormalizedShortcut, ResolvedShortcutConfig, ShortcutConfigError, ShortcutId,
 };
 
+enum CaptureOutcome {
+    ContinueListening,
+    CancelListening,
+    Capture(NormalizedShortcut),
+    Error(String),
+}
+
 pub const KEYBIND_EDITOR_CSS: &str = r#"
 .limux-keybind-editor {
     background: linear-gradient(180deg, rgba(24, 24, 24, 0.98), rgba(18, 18, 18, 0.98));
@@ -242,44 +249,28 @@ pub fn build_keybind_editor(
                     return gtk::glib::Propagation::Proceed;
                 }
 
-                if keyval == gtk::gdk::Key::Escape {
-                    *listening.borrow_mut() = None;
-                    errors.borrow_mut().remove(&shortcut_id);
-                    refresh_rows(&rows.borrow(), &state.borrow(), None, &errors.borrow());
-                    return gtk::glib::Propagation::Stop;
-                }
-
-                let Some(binding) = NormalizedShortcut::from_gdk_key(keyval, modifier) else {
-                    *listening.borrow_mut() = None;
-                    errors.borrow_mut().insert(
-                        shortcut_id,
-                        validation_error_message(&ShortcutConfigError::ModifierOnlyBinding {
-                            shortcut_id: config_key.to_string(),
-                            input: String::new(),
-                        }),
-                    );
-                    refresh_rows(&rows.borrow(), &state.borrow(), None, &errors.borrow());
-                    return gtk::glib::Propagation::Stop;
-                };
-
-                if let Err(err) = binding.validate_host_binding(config_key) {
-                    *listening.borrow_mut() = None;
-                    errors
-                        .borrow_mut()
-                        .insert(shortcut_id, validation_error_message(&err));
-                    refresh_rows(&rows.borrow(), &state.borrow(), None, &errors.borrow());
-                    return gtk::glib::Propagation::Stop;
-                }
-
-                match on_capture(shortcut_id, binding) {
-                    Ok(updated) => {
-                        *state.borrow_mut() = updated;
+                match capture_outcome_for_key_event(keyval, modifier, config_key) {
+                    CaptureOutcome::ContinueListening => {
+                        return gtk::glib::Propagation::Stop;
+                    }
+                    CaptureOutcome::CancelListening => {
                         *listening.borrow_mut() = None;
                         errors.borrow_mut().remove(&shortcut_id);
                     }
-                    Err(err) => {
+                    CaptureOutcome::Capture(binding) => match on_capture(shortcut_id, binding) {
+                        Ok(updated) => {
+                            *state.borrow_mut() = updated;
+                            *listening.borrow_mut() = None;
+                            errors.borrow_mut().remove(&shortcut_id);
+                        }
+                        Err(err) => {
+                            *listening.borrow_mut() = None;
+                            errors.borrow_mut().insert(shortcut_id, err);
+                        }
+                    },
+                    CaptureOutcome::Error(message) => {
                         *listening.borrow_mut() = None;
-                        errors.borrow_mut().insert(shortcut_id, err);
+                        errors.borrow_mut().insert(shortcut_id, message);
                     }
                 }
 
@@ -354,6 +345,25 @@ fn refresh_rows(
     }
 }
 
+fn capture_outcome_for_key_event(
+    keyval: gtk::gdk::Key,
+    modifier: gtk::gdk::ModifierType,
+    config_key: &str,
+) -> CaptureOutcome {
+    if keyval == gtk::gdk::Key::Escape {
+        return CaptureOutcome::CancelListening;
+    }
+
+    let Some(binding) = NormalizedShortcut::from_gdk_key(keyval, modifier) else {
+        return CaptureOutcome::ContinueListening;
+    };
+
+    match binding.validate_host_binding(config_key) {
+        Ok(()) => CaptureOutcome::Capture(binding),
+        Err(err) => CaptureOutcome::Error(validation_error_message(&err)),
+    }
+}
+
 fn validation_error_message(err: &ShortcutConfigError) -> String {
     match err {
         ShortcutConfigError::BaseModifierRequired { .. } => {
@@ -371,10 +381,14 @@ fn validation_error_message(err: &ShortcutConfigError) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{binding_button_label, validation_error_message};
+    use super::{
+        binding_button_label, capture_outcome_for_key_event, validation_error_message,
+        CaptureOutcome,
+    };
     use crate::shortcut_config::{
         default_shortcuts, resolve_shortcuts_from_str, ShortcutConfigError, ShortcutId,
     };
+    use gtk4::gdk;
 
     #[test]
     fn binding_button_label_prefers_current_binding_and_listening_state() {
@@ -412,5 +426,31 @@ mod tests {
             validation_error_message(&err),
             "Use Ctrl or Alt together with another key."
         );
+    }
+
+    #[test]
+    fn capture_outcome_keeps_listening_for_modifier_only_press() {
+        assert!(matches!(
+            capture_outcome_for_key_event(
+                gdk::Key::Control_L,
+                gdk::ModifierType::empty(),
+                "split_right"
+            ),
+            CaptureOutcome::ContinueListening
+        ));
+    }
+
+    #[test]
+    fn capture_outcome_commits_first_non_modifier_with_current_modifiers() {
+        match capture_outcome_for_key_event(
+            gdk::Key::_0,
+            gdk::ModifierType::CONTROL_MASK,
+            "split_right",
+        ) {
+            CaptureOutcome::Capture(binding) => {
+                assert_eq!(binding.to_display_label(), "Ctrl+0");
+            }
+            _ => panic!("expected capture"),
+        }
     }
 }
