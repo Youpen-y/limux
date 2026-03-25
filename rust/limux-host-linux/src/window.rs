@@ -894,6 +894,15 @@ fn install_key_capture(window: &adw::ApplicationWindow, state: &State) {
 
     let state = state.clone();
     key_controller.connect_key_pressed(move |controller, keyval, keycode, modifier| {
+        let focused_listening_editor = controller
+            .widget()
+            .and_then(|widget| widget.downcast::<gtk::Window>().ok())
+            .map(|window| focused_widget_is_listening_for_keybind_capture(&window))
+            .unwrap_or(false);
+        if focused_listening_editor {
+            return glib::Propagation::Proceed;
+        }
+
         let matched = {
             let s = state.borrow();
             let display = controller.widget().map(|widget| widget.display());
@@ -911,14 +920,29 @@ fn install_key_capture(window: &adw::ApplicationWindow, state: &State) {
         })
         .unwrap_or(false);
 
-        if matched {
-            glib::Propagation::Stop
-        } else {
-            glib::Propagation::Proceed
-        }
+        shortcut_dispatch_propagation(matched)
     });
 
     window.add_controller(key_controller);
+}
+
+fn focused_widget_is_listening_for_keybind_capture(window: &gtk::Window) -> bool {
+    let mut widget = gtk::prelude::GtkWindowExt::focus(window);
+    while let Some(current) = widget {
+        if current.has_css_class(keybind_editor::KEYBIND_EDITOR_LISTENING_CSS) {
+            return true;
+        }
+        widget = current.parent();
+    }
+    false
+}
+
+fn shortcut_dispatch_propagation(matched: bool) -> glib::Propagation {
+    if matched {
+        glib::Propagation::Stop
+    } else {
+        glib::Propagation::Proceed
+    }
 }
 
 #[cfg(test)]
@@ -1030,12 +1054,12 @@ fn refresh_shortcut_tooltips_in_layout(widget: &gtk::Widget, shortcuts: &Resolve
 fn persist_shortcut_binding(
     state: &State,
     id: ShortcutId,
-    binding: shortcut_config::NormalizedShortcut,
+    binding: Option<shortcut_config::NormalizedShortcut>,
 ) -> Result<ResolvedShortcutConfig, String> {
     let updated = {
         let s = state.borrow();
         s.shortcuts
-            .with_binding(id, Some(binding))
+            .with_binding(id, binding)
             .map_err(|err| err.to_string())?
     };
 
@@ -1065,7 +1089,7 @@ fn open_keybind_editor_tab(state: &State, pane_widget: &gtk::Widget) {
     let on_capture: Rc<
         dyn Fn(
             ShortcutId,
-            shortcut_config::NormalizedShortcut,
+            Option<shortcut_config::NormalizedShortcut>,
         ) -> Result<ResolvedShortcutConfig, String>,
     > = {
         let state = state.clone();
@@ -2398,10 +2422,11 @@ fn mark_workspace_unread(state: &State, ws_id: &str) {
 
 #[cfg(test)]
 mod tests {
+    use super::glib;
     use super::gtk::gdk;
     use super::{
         clamp_workspace_insert_index_for_pinning, favorites_prefix_len,
-        shortcut_command_from_key_event, sidebar_toggle_tooltip,
+        shortcut_command_from_key_event, shortcut_dispatch_propagation, sidebar_toggle_tooltip,
     };
     use crate::shortcut_config::{default_shortcuts, resolve_shortcuts_from_str, ShortcutCommand};
 
@@ -2499,6 +2524,15 @@ mod tests {
                 gdk::ModifierType::CONTROL_MASK
             ),
             None
+        );
+    }
+
+    #[test]
+    fn shortcut_dispatch_propagation_stops_only_when_window_claims_shortcut() {
+        assert_eq!(shortcut_dispatch_propagation(true), glib::Propagation::Stop);
+        assert_eq!(
+            shortcut_dispatch_propagation(false),
+            glib::Propagation::Proceed
         );
     }
 

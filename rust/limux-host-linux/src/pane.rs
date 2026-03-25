@@ -26,7 +26,7 @@ type PaneSignalCallback = dyn Fn();
 type PanePathCallback = dyn Fn(&str);
 type PaneShortcutStateCallback = dyn Fn() -> Rc<ResolvedShortcutConfig>;
 type PaneShortcutCaptureCallback =
-    dyn Fn(ShortcutId, NormalizedShortcut) -> Result<ResolvedShortcutConfig, String>;
+    dyn Fn(ShortcutId, Option<NormalizedShortcut>) -> Result<ResolvedShortcutConfig, String>;
 
 pub struct PaneCallbacks {
     pub on_split: Box<PaneSplitCallback>,
