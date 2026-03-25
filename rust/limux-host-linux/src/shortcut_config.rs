@@ -1529,6 +1529,7 @@ fn runtime_key_to_gtk_key(key: &str) -> String {
         "enter" => "Return".to_string(),
         "escape" => "Escape".to_string(),
         "tab" => "Tab".to_string(),
+        other if is_function_key(other) => other.to_ascii_uppercase(),
         other => other.to_string(),
     }
 }
@@ -1562,6 +1563,19 @@ fn display_key_label(key: &str) -> String {
             .collect::<Vec<_>>()
             .join(" "),
     }
+}
+
+fn is_function_key(key: &str) -> bool {
+    key.strip_prefix('f')
+        .map(|suffix| {
+            !suffix.is_empty()
+                && suffix.chars().all(|ch| ch.is_ascii_digit())
+                && suffix
+                    .parse::<u8>()
+                    .map(|value| value >= 1)
+                    .unwrap_or(false)
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -2007,6 +2021,12 @@ mod tests {
         assert_eq!(
             resolved.command_for_runtime_combo("f11"),
             Some(ShortcutCommand::ToggleFullscreen)
+        );
+        assert_eq!(
+            resolved
+                .find_by_id(ShortcutId::ToggleFullscreen)
+                .map(ResolvedShortcut::gtk_accel_variants),
+            Some(vec!["F11".to_string()])
         );
     }
 
