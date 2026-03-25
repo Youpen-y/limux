@@ -10,6 +10,7 @@ use std::os::unix::ffi::OsStringExt;
 use std::ptr;
 use std::rc::Rc;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use limux_ghostty_sys::*;
 
@@ -889,7 +890,7 @@ fn show_terminal_context_menu(
                     "Keybinds" => {
                         let anchor: gtk::Widget = gl_area.clone().upcast();
                         let cb = cb.clone();
-                        glib::idle_add_local_once(move || {
+                        glib::timeout_add_local_once(Duration::from_millis(80), move || {
                             (cb.on_open_keybinds)(&anchor);
                         });
                     }

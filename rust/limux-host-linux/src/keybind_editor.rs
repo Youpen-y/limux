@@ -101,6 +101,14 @@ pub fn build_keybind_editor(
     popover.set_parent(anchor);
     popover.set_has_arrow(false);
     popover.set_autohide(true);
+    popover.set_position(gtk::PositionType::Bottom);
+    let allocation = anchor.allocation();
+    popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
+        allocation.width() / 2,
+        allocation.height() / 2,
+        1,
+        1,
+    )));
 
     let state = Rc::new(RefCell::new(shortcuts.clone()));
     let listening = Rc::new(RefCell::new(None::<ShortcutId>));
