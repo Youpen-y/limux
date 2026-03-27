@@ -2538,7 +2538,7 @@ fn close_workspace_by_id_internal(
 }
 
 fn switch_workspace(state: &State, idx: usize) {
-    let (stack, stack_name, unread_handles) = {
+    let (stack, stack_name, unread_handles, focus_root) = {
         let mut s = state.borrow_mut();
         if idx >= s.workspaces.len() || idx == s.active_idx {
             return;
@@ -2546,6 +2546,7 @@ fn switch_workspace(state: &State, idx: usize) {
         s.active_idx = idx;
         let stack = s.stack.clone();
         let stack_name = format!("ws-{}", s.workspaces[idx].id);
+        let focus_root = s.workspaces[idx].root.clone();
 
         let unread_handles = if s.workspaces[idx].unread {
             let ws = &mut s.workspaces[idx];
@@ -2559,10 +2560,13 @@ fn switch_workspace(state: &State, idx: usize) {
             None
         };
 
-        (stack, stack_name, unread_handles)
+        (stack, stack_name, unread_handles, focus_root)
     };
 
     stack.set_visible_child_name(&stack_name);
+    glib::idle_add_local_once(move || {
+        focus_workspace_entrypoint(&focus_root);
+    });
 
     if let Some((notify_dot, notify_label, sidebar_row)) = unread_handles {
         notify_dot.remove_css_class("limux-notify-dot");
@@ -2594,6 +2598,29 @@ fn cycle_workspace(state: &State, direction: i32) {
     };
     switch_workspace(state, new_idx);
     sidebar_list.select_row(Some(&row));
+}
+
+fn focus_workspace_entrypoint(root: &gtk::Widget) {
+    let pane = first_leaf_pane(root);
+    if !pane::focus_active_tab_in_pane(&pane) {
+        if let Some(gl) = find_gl_area(&pane) {
+            gl.grab_focus();
+        } else if pane.is_focusable() || pane.can_focus() {
+            pane.grab_focus();
+        } else {
+            pane.child_focus(gtk::DirectionType::TabForward);
+        }
+    }
+}
+
+fn first_leaf_pane(widget: &gtk::Widget) -> gtk::Widget {
+    if let Some(paned) = widget.downcast_ref::<gtk::Paned>() {
+        if let Some(child) = paned.start_child().or_else(|| paned.end_child()) {
+            return first_leaf_pane(&child);
+        }
+    }
+
+    widget.clone()
 }
 
 /// Default sidebar width in pixels.
