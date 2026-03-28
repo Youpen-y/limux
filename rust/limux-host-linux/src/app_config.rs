@@ -283,8 +283,8 @@ fn ensure_default_config_file(path: &Path) -> std::io::Result<()> {
     fs::create_dir_all(parent)?;
     let default_root = json!({
         "appearance": {
-            "color_scheme": "system",
-            "ghostty_color_scheme": "system"
+            "color_scheme": "dark",
+            "ghostty_color_scheme": "dark"
         },
         "focus": {
             "hover_terminal_focus": false
@@ -344,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_default_config_file_writes_opt_in_false_setting() {
+    fn ensure_default_config_file_writes_dark_appearance_and_opt_in_false_setting() {
         let dir = TempDir::new().expect("temp dir");
         let path = settings_path_in(dir.path());
 
@@ -354,8 +354,12 @@ mod tests {
         let parsed: Value = serde_json::from_str(&raw).expect("parse config");
         assert_eq!(parsed["focus"]["hover_terminal_focus"], Value::Bool(false));
         assert_eq!(
+            parsed["appearance"]["color_scheme"],
+            Value::String("dark".to_string())
+        );
+        assert_eq!(
             parsed["appearance"]["ghostty_color_scheme"],
-            Value::String("system".to_string())
+            Value::String("dark".to_string())
         );
     }
 
