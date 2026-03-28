@@ -1531,7 +1531,8 @@ fn portal_settings_proxy() -> Option<gio::DBusProxy> {
 fn portal_prefers_dark_from_raw(raw: u32) -> Option<bool> {
     match raw {
         1 => Some(true),
-        0 | 2 => Some(false),
+        2 => Some(false),
+        0 => None,
         _ => None,
     }
 }
@@ -3708,7 +3709,8 @@ mod tests {
     use super::{
         build_window_css, clamp_workspace_insert_index_for_pinning, favorites_prefix_len,
         ghostty_prefers_dark, gtk_system_prefers_dark_from_raw, next_active_workspace_index,
-        queue_session_save_request, sanitize_background_opacity,
+        portal_prefers_dark_from_raw, queue_session_save_request,
+        sanitize_background_opacity,
         shortcut_allowed_while_browser_find_active, shortcut_blocked_by_editable,
         shortcut_command_from_key_event, shortcut_dispatch_propagation, tab_drag_workspace_seed,
         use_opaque_window_background, workspace_drop_layout_path, workspace_notification_message,
@@ -3858,6 +3860,13 @@ mod tests {
             gtk_system_prefers_dark_from_raw(Some(ffi::GTK_INTERFACE_COLOR_SCHEME_UNSUPPORTED)),
             None
         );
+    }
+
+    #[test]
+    fn portal_prefers_dark_from_raw_treats_default_as_unknown() {
+        assert_eq!(portal_prefers_dark_from_raw(1), Some(true));
+        assert_eq!(portal_prefers_dark_from_raw(2), Some(false));
+        assert_eq!(portal_prefers_dark_from_raw(0), None);
     }
 
     #[test]
