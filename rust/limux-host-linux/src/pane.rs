@@ -15,8 +15,10 @@ use gtk4 as gtk;
 #[cfg(feature = "webkit")]
 use webkit6::prelude::*;
 
+use crate::app_config::AppConfig;
 use crate::keybind_editor;
 use crate::layout_state::{PaneState, TabContentState, TabState as SavedTabState};
+use crate::settings_editor;
 use crate::shortcut_config::{NormalizedShortcut, ResolvedShortcutConfig, ShortcutId};
 use crate::terminal::{self, TerminalCallbacks};
 
@@ -164,6 +166,8 @@ type PaneShortcutStateCallback = dyn Fn() -> Rc<ResolvedShortcutConfig>;
 type PaneShortcutCaptureCallback =
     dyn Fn(ShortcutId, Option<NormalizedShortcut>) -> Result<ResolvedShortcutConfig, String>;
 type PaneSplitWithTabCallback = dyn Fn(&gtk::Widget, &gtk::Widget, gtk::Orientation, String, bool);
+type PaneConfigCallback = dyn Fn() -> Rc<RefCell<AppConfig>>;
+type PaneConfigChangedCallback = dyn Fn(&AppConfig, &AppConfig);
 
 pub struct PaneCallbacks {
     pub on_split: Box<PaneSplitCallback>,
@@ -177,8 +181,9 @@ pub struct PaneCallbacks {
     pub on_pwd_changed: Box<PanePathCallback>,
     pub on_empty: Box<PaneEmptyCallback>,
     pub on_state_changed: Box<PaneSignalCallback>,
-    pub hover_terminal_focus: bool,
     pub on_split_with_tab: Box<PaneSplitWithTabCallback>,
+    pub current_config: Box<PaneConfigCallback>,
+    pub on_config_changed: Rc<PaneConfigChangedCallback>,
 }
 
 #[derive(Clone)]
@@ -255,8 +260,9 @@ struct TabContextMenuContext {
 
 pub const PANE_CSS: &str = r#"
 .limux-pane-header {
-    background-color: rgba(30, 30, 30, 1);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    background-color: @window_bg_color;
+    color: @window_fg_color;
+    border-bottom: 1px solid alpha(@window_fg_color, 0.08);
     min-height: 30px;
     padding: 0 2px;
 }
@@ -265,17 +271,17 @@ pub const PANE_CSS: &str = r#"
     border: none;
     border-radius: 4px 4px 0 0;
     padding: 4px 4px 4px 10px;
-    color: rgba(255, 255, 255, 0.45);
+    color: alpha(@window_fg_color, 0.5);
     min-height: 0;
     font-size: 12px;
 }
 .limux-tab:hover {
-    color: rgba(255, 255, 255, 0.7);
-    background: rgba(255, 255, 255, 0.04);
+    color: alpha(@window_fg_color, 0.72);
+    background: alpha(@window_fg_color, 0.04);
 }
 .limux-tab-active {
-    color: white;
-    background: rgba(255, 255, 255, 0.08);
+    color: @window_fg_color;
+    background: alpha(@window_fg_color, 0.08);
 }
 .limux-tab-close {
     background: none;
@@ -284,12 +290,12 @@ pub const PANE_CSS: &str = r#"
     padding: 1px;
     min-height: 0;
     min-width: 0;
-    color: rgba(255, 255, 255, 0.25);
+    color: alpha(@window_fg_color, 0.28);
     margin-left: 4px;
 }
 .limux-tab-close:hover {
-    color: rgba(255, 255, 255, 0.8);
-    background: rgba(255, 255, 255, 0.1);
+    color: alpha(@window_fg_color, 0.8);
+    background: alpha(@window_fg_color, 0.1);
 }
 .limux-pane-action {
     background: none;
@@ -298,21 +304,21 @@ pub const PANE_CSS: &str = r#"
     padding: 4px 5px;
     min-height: 0;
     min-width: 0;
-    color: rgba(255, 255, 255, 0.35);
+    color: alpha(@window_fg_color, 0.4);
 }
 .limux-pane-action:hover {
-    background: rgba(255, 255, 255, 0.08);
-    color: rgba(255, 255, 255, 0.8);
+    background: alpha(@window_fg_color, 0.08);
+    color: alpha(@window_fg_color, 0.8);
 }
 .limux-split-icon {
-    border: 1px solid rgba(255, 255, 255, 0.4);
+    border: 1px solid alpha(@window_fg_color, 0.4);
     border-radius: 2px;
     min-width: 16px;
     min-height: 12px;
     padding: 0;
 }
 .limux-split-icon:hover {
-    border-color: rgba(255, 255, 255, 0.8);
+    border-color: alpha(@window_fg_color, 0.8);
 }
 .limux-split-half-v {
     min-width: 6px;
@@ -331,7 +337,7 @@ pub const PANE_CSS: &str = r#"
     min-width: 0;
 }
 .limux-split-btn:hover {
-    background: rgba(255, 255, 255, 0.08);
+    background: alpha(@window_fg_color, 0.08);
 }
 .limux-pin-icon {
     font-size: 9px;
@@ -351,7 +357,7 @@ pub const PANE_CSS: &str = r#"
     font-size: 12px;
 }
 .limux-tab-drop-indicator {
-    background-color: #5b9bd5;
+    background-color: @accent_bg_color;
     min-width: 2px;
     margin: 2px 0;
 }
@@ -359,12 +365,12 @@ pub const PANE_CSS: &str = r#"
     box-shadow: none;
 }
 .limux-drop-preview {
-    background: rgba(0, 145, 255, 0.24);
-    border: 1px solid rgba(0, 145, 255, 0.65);
+    background: alpha(@accent_bg_color, 0.24);
+    border: 1px solid alpha(@accent_bg_color, 0.65);
     border-radius: 10px;
 }
 .limux-drop-preview-center {
-    background: rgba(0, 145, 255, 0.14);
+    background: alpha(@accent_bg_color, 0.14);
 }
 "#;
 
@@ -454,6 +460,7 @@ pub fn create_pane(
         "limux-split-vertical-symbolic",
         &pane_action_tooltip(&shortcuts, "Split down", Some(ShortcutId::SplitDown)),
     );
+    let settings_btn = icon_button("emblem-system-symbolic", "Settings");
     let close_btn = icon_button(
         "window-close-symbolic",
         &pane_action_tooltip(&shortcuts, "Close pane", Some(ShortcutId::CloseFocusedPane)),
@@ -463,6 +470,7 @@ pub fn create_pane(
     actions.append(&new_browser_btn);
     actions.append(&split_h_btn);
     actions.append(&split_v_btn);
+    actions.append(&settings_btn);
     actions.append(&close_btn);
 
     header.append(&tab_overlay);
@@ -536,6 +544,20 @@ pub fn create_pane(
         let cb = callbacks.clone();
         close_btn.connect_clicked(move |_| {
             (cb.on_close_pane)(&pw.clone().upcast());
+        });
+    }
+    {
+        let internals = internals.clone();
+        settings_btn.connect_clicked(move |_| {
+            settings_editor::present_settings_dialog(
+                &internals.pane_outer,
+                settings_editor::SettingsEditorInput {
+                    config: (internals.callbacks.current_config)(),
+                    shortcuts: (internals.callbacks.current_shortcuts)(),
+                    on_capture: internals.callbacks.on_capture_shortcut.clone(),
+                    on_config_changed: internals.callbacks.on_config_changed.clone(),
+                },
+            );
         });
     }
 
@@ -796,7 +818,13 @@ fn restore_tabs_from_state(
                     }),
                 },
             ),
+            // Settings now open in a transient dialog rather than a persisted tab.
+            TabContentState::Settings {} => {}
         }
+    }
+
+    if internals.tab_state.borrow().tabs.is_empty() {
+        add_terminal_tab_inner(internals, working_directory, None);
     }
 
     let active_tab_id = saved_state
@@ -952,12 +980,18 @@ fn add_terminal_tab_inner(
             .or_else(|| working_directory.map(|cwd| cwd.to_string())),
     ));
     let term_callbacks = make_terminal_callbacks(internals, &tab_id, &title_label, &term_cwd);
+    let hover_focus = {
+        let callbacks = internals.callbacks.clone();
+        Rc::new(move || {
+            let config = (callbacks.current_config)();
+            let hover_focus = config.borrow().focus.hover_terminal_focus;
+            hover_focus
+        })
+    };
 
     let term = terminal::create_terminal(
         working_directory,
-        terminal::TerminalOptions {
-            hover_focus: internals.callbacks.hover_terminal_focus,
-        },
+        terminal::TerminalOptions { hover_focus },
         term_callbacks,
     );
     let widget: gtk::Widget = term.overlay.clone().upcast();
